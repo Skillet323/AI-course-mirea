@@ -93,7 +93,7 @@ def report(
     corr_df = correlation_matrix(df)
     top_cats = top_categories(df, max_columns=5, top_k=top_k_categories)
 
-    # 2. Качество в целом
+    # 2. Качество в целом (учитываем min_missing_share)
     quality_flags = compute_quality_flags(summary, missing_df, min_missing_share)
 
     # 3. Сохраняем табличные артефакты
@@ -113,25 +113,39 @@ def report(
         f.write(f"Строк: **{summary.n_rows}**, столбцов: **{summary.n_cols}**\n\n")
 
         f.write("## Качество данных (эвристики)\n\n")
-        f.write(f"- Оценка качества: **{quality_flags['quality_score']:.2f}**\n")
-        f.write(f"- Макс. доля пропусков по колонке: **{quality_flags['max_missing_share']:.2%}**\n")
-        f.write(f"- Слишком мало строк: **{quality_flags['too_few_rows']}**\n")
-        f.write(f"- Слишком много колонок: **{quality_flags['too_many_columns']}**\n")
-        f.write(f"- Слишком много пропусков: **{quality_flags['too_many_missing']}**\n")
-        f.write(f"- Константные колонки: **{quality_flags['has_constant_columns']}**\n")
-        f.write(f"- Высокая кардинальность категориальных признаков: **{quality_flags['has_high_cardinality_categoricals']}**\n\n")
-        
+        f.write(f"- Оценка качества: **{quality_flags.get('quality_score', 0.0):.2f}**\n")
+        f.write(f"- Макс. доля пропусков по колонке: **{quality_flags.get('max_missing_share', 0.0):.2%}**\n")
+        f.write(f"- Слишком мало строк: **{quality_flags.get('too_few_rows', False)}**\n")
+        f.write(f"- Слишком много колонок: **{quality_flags.get('too_many_columns', False)}**\n")
+        f.write(f"- Слишком много пропусков: **{quality_flags.get('too_many_missing', False)}**\n")
+        f.write(f"- Константные колонки: **{quality_flags.get('has_constant_columns', False)}**\n")
+        f.write(f"- Высокая кардинальность категориальных признаков: **{quality_flags.get('has_high_cardinality_categoricals', False)}**\n")
+        f.write(f"- Количество проблемных колонок по порогу {min_missing_share:.0%}: **{quality_flags.get('problematic_missing_count', 0)}**\n\n")
+
         f.write("### Параметры отчёта\n\n")
         f.write(f"- Отображается топ-{top_k_categories} категорий для категориальных признаков\n")
         f.write(f"- Колонки с долей пропусков > {min_missing_share:.0%} считаются проблемными\n\n")
 
-        # Проблемные колонки с пропусками
-        problematic_missing = missing_df[missing_df["missing_share"] > min_missing_share]
-        if not problematic_missing.empty:
+        # Используем problematic_missing_cols из quality_flags (если есть)
+        problematic_cols = quality_flags.get("problematic_missing_cols", [])
+        if problematic_cols:
             f.write("### Проблемные колонки с высокой долей пропусков\n\n")
-            for col, row in problematic_missing.iterrows():
-                f.write(f"- **{col}**: {row['missing_share']:.2%} пропусков\n")
+            for col in problematic_cols:
+                # берём значение missing_share из missing_df, если он там присутствует
+                if (not missing_df.empty) and (col in missing_df.index):
+                    share = missing_df.loc[col, "missing_share"]
+                    f.write(f"- **{col}**: {share:.2%} пропусков\n")
+                else:
+                    f.write(f"- **{col}**: (доля пропусков не найдена в missing_table)\n")
             f.write("\n")
+        else:
+            # Если quality_flags не вернул список, можно также вывести локально найденные колонки (как fallback)
+            local_problematic = missing_df[missing_df["missing_share"] > min_missing_share] if not missing_df.empty else pd.DataFrame()
+            if not local_problematic.empty:
+                f.write("### Локально найденные проблемные колонки (по missing_df)\n\n")
+                for col, row in local_problematic.iterrows():
+                    f.write(f"- **{col}**: {row['missing_share']:.2%} пропусков\n")
+                f.write("\n")
 
         f.write("## Колонки\n\n")
         f.write("См. файл `summary.csv`.\n\n")
@@ -182,7 +196,10 @@ def report(
     typer.echo(f"- Основной markdown: {md_path}")
     typer.echo("- Табличные файлы: summary.csv, missing.csv, correlation.csv, top_categories/*.csv")
     typer.echo("- Графики: hist_*.png, missing_matrix.png, correlation_heatmap.png")
-
+    typer.echo("Краткая сводка эвристик качества:")
+    typer.echo(f"- quality_score: {quality_flags.get('quality_score', 0.0):.2f}")
+    typer.echo(f"- problematic_missing_count: {quality_flags.get('problematic_missing_count', 0)}")
+    typer.echo(f"- problematic_missing_cols: {quality_flags.get('problematic_missing_cols', [])}")
 
 if __name__ == "__main__":
     app()
