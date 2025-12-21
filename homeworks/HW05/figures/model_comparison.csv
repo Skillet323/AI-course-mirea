@@ -1,0 +1,3 @@
+model,accuracy,roc_auc
+Dummy(most_frequent),0.59,0.5
+LogisticRegression,0.8,0.8756373156951908
