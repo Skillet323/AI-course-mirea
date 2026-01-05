@@ -1,0 +1,10 @@
+{
+  "best_model_name": "Stacking",
+  "selection_metric": "roc_auc",
+  "test_metrics": {
+    "accuracy": 0.9064444444444445,
+    "f1": 0.8101037437979252,
+    "roc_auc": 0.9279989984385023
+  },
+  "timestamp": "2026-01-05 15:14:04"
+}
