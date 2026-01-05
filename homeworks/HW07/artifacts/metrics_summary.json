@@ -1,0 +1,113 @@
+{
+  "S07-hw-dataset-02": {
+    "kmeans": {
+      "params": {
+        "k": 2
+      },
+      "metrics": {
+        "silhouette": 0.3068610017701601,
+        "davies_bouldin": 1.3234721699867644,
+        "calinski_harabasz": 3573.3933329348392
+      },
+      "n_clusters": 2
+    },
+    "second": {
+      "algo": "DBSCAN",
+      "params": {
+        "eps": 0.34605338681853065,
+        "min_samples": 5
+      },
+      "metrics": {
+        "silhouette": 0.25925938406248017,
+        "davies_bouldin": 0.6149251012946615,
+        "calinski_harabasz": 25.694925336426405
+      },
+      "noise_frac": 0.06725
+    },
+    "chosen": {
+      "algo": "KMeans",
+      "params": {
+        "k": 2
+      },
+      "metrics": {
+        "silhouette": 0.3068610017701601,
+        "davies_bouldin": 1.3234721699867644,
+        "calinski_harabasz": 3573.3933329348392
+      }
+    }
+  },
+  "S07-hw-dataset-03": {
+    "kmeans": {
+      "params": {
+        "k": 3
+      },
+      "metrics": {
+        "silhouette": 0.3155447003782518,
+        "davies_bouldin": 1.1577256320598661,
+        "calinski_harabasz": 6957.162639510167
+      },
+      "n_clusters": 3
+    },
+    "second": {
+      "algo": "DBSCAN",
+      "params": {
+        "eps": 0.615039098413056,
+        "min_samples": 5
+      },
+      "metrics": {
+        "silhouette": 0.1560471541383505,
+        "davies_bouldin": 0.7572560843997979,
+        "calinski_harabasz": 17.717231418577402
+      },
+      "noise_frac": 0.009
+    },
+    "chosen": {
+      "algo": "KMeans",
+      "params": {
+        "k": 3
+      },
+      "metrics": {
+        "silhouette": 0.3155447003782518,
+        "davies_bouldin": 1.1577256320598661,
+        "calinski_harabasz": 6957.162639510167
+      }
+    }
+  },
+  "S07-hw-dataset-04": {
+    "kmeans": {
+      "params": {
+        "k": 6
+      },
+      "metrics": {
+        "silhouette": 0.429013016033581,
+        "davies_bouldin": 0.9830409608302536,
+        "calinski_harabasz": 4681.459777999189
+      },
+      "n_clusters": 6
+    },
+    "second": {
+      "algo": "DBSCAN",
+      "params": {
+        "eps": 3.2615185950303487,
+        "min_samples": 5
+      },
+      "metrics": {
+        "silhouette": 0.2752528756753223,
+        "davies_bouldin": 1.3948432917702138,
+        "calinski_harabasz": 584.9248462417088
+      },
+      "noise_frac": 0.0424
+    },
+    "chosen": {
+      "algo": "KMeans",
+      "params": {
+        "k": 6
+      },
+      "metrics": {
+        "silhouette": 0.429013016033581,
+        "davies_bouldin": 0.9830409608302536,
+        "calinski_harabasz": 4681.459777999189
+      }
+    }
+  }
+}

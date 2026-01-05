@@ -1,0 +1,23 @@
+{
+  "S07-hw-dataset-02": {
+    "algo": "KMeans",
+    "params": {
+      "k": 2
+    },
+    "selection_reason": "silhouette/CH heuristics"
+  },
+  "S07-hw-dataset-03": {
+    "algo": "KMeans",
+    "params": {
+      "k": 3
+    },
+    "selection_reason": "silhouette/CH heuristics"
+  },
+  "S07-hw-dataset-04": {
+    "algo": "KMeans",
+    "params": {
+      "k": 6
+    },
+    "selection_reason": "silhouette/CH heuristics"
+  }
+}
