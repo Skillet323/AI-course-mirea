@@ -27,6 +27,6 @@
       "max_depth": 5,
       "n_estimators": 100
     },
-    "cv_score": 0.9218778763925183
+    "cv_score": 0.92187810312377
   }
 }
