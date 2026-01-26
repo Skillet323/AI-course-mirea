@@ -42,9 +42,9 @@
         "k": 3
       },
       "metrics": {
-        "silhouette": 0.3155447003782518,
+        "silhouette": 0.31554470037825183,
         "davies_bouldin": 1.1577256320598661,
-        "calinski_harabasz": 6957.162639510167
+        "calinski_harabasz": 6957.162639510166
       },
       "n_clusters": 3
     },
@@ -56,8 +56,8 @@
       },
       "metrics": {
         "silhouette": 0.1560471541383505,
-        "davies_bouldin": 0.7572560843997979,
-        "calinski_harabasz": 17.717231418577402
+        "davies_bouldin": 0.7572560843997983,
+        "calinski_harabasz": 17.71723141857741
       },
       "noise_frac": 0.009
     },
@@ -67,9 +67,9 @@
         "k": 3
       },
       "metrics": {
-        "silhouette": 0.3155447003782518,
+        "silhouette": 0.31554470037825183,
         "davies_bouldin": 1.1577256320598661,
-        "calinski_harabasz": 6957.162639510167
+        "calinski_harabasz": 6957.162639510166
       }
     }
   },
@@ -92,7 +92,7 @@
         "min_samples": 5
       },
       "metrics": {
-        "silhouette": 0.2752528756753223,
+        "silhouette": 0.27525287567532225,
         "davies_bouldin": 1.3948432917702138,
         "calinski_harabasz": 584.9248462417088
       },
