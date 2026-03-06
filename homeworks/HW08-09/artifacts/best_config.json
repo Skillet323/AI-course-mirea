@@ -1,0 +1,26 @@
+{
+  "experiment": "E4",
+  "chosen": "E3",
+  "model_cfg": {
+    "hidden_sizes": [
+      512,
+      256,
+      128
+    ],
+    "dropout": 0.0,
+    "batchnorm": true
+  },
+  "train_cfg": {
+    "epochs": 10,
+    "optimizer": {
+      "type": "Adam",
+      "lr": 0.001,
+      "weight_decay": 0.0
+    },
+    "early_stopping": {
+      "patience": 4
+    }
+  },
+  "seed": 42,
+  "dataset": "CIFAR10"
+}
