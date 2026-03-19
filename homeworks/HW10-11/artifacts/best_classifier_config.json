@@ -1,0 +1,16 @@
+{
+  "experiment_id": "C4",
+  "task": "classification",
+  "dataset": "Flowers102",
+  "seed": 42,
+  "model_summary": "ResNet18 (pretrained, partial fine-tune)",
+  "optimizer": "Adam",
+  "lr": 0.0001,
+  "epochs_trained": 15,
+  "best_val_accuracy": 0.7450980392156863,
+  "test_accuracy": 0.7180029273052528,
+  "precision": null,
+  "recall": null,
+  "mean_iou": null,
+  "notes": "ResNet18 partial finetune: layer4 + fc trainable"
+}
