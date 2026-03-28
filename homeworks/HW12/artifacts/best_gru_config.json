@@ -11,9 +11,9 @@
   "dropout": 0.0,
   "batch_size": 64,
   "lr": 0.001,
-  "epochs_trained": 20,
+  "epochs_trained": 45,
   "patience": 8,
   "scaler": "StandardScaler(on train target only)",
-  "best_epoch": 12,
-  "best_val_mae": 5.459543704986572
+  "best_epoch": 37,
+  "best_val_mae": 4.918689727783203
 }
