@@ -1,0 +1,713 @@
+"""
+API Routes with metrics, webhooks, and enhanced pipeline.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import os
+import shutil
+import tempfile
+import time
+from pathlib import Path
+from typing import Any
+
+import httpx
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
+from fastapi.responses import FileResponse, JSONResponse, Response
+from pydantic import BaseModel
+from sqlmodel import Session, select
+
+from ..config import settings
+from ..db import engine, get_session
+from ..models import Meeting, Participant, ProcessingMetrics, Rule, Task
+from ..services.evaluation import evaluate_meeting
+from ..services.task_extraction import extract_tasks as extract
+from ..services.transcription import transcribe_from_bytes as transcribe
+from ..services.assignment_engine import assign_tasks_to_participants as _assign_tasks_batch
+from ..services.evaluation import build_proxy_metrics
+logger = logging.getLogger(__name__)
+router = APIRouter()
+
+class SpeakerAliasesPayload(BaseModel):
+    aliases: dict[str, str]
+
+
+try:
+    from ..services.assignment_engine import assign_tasks_to_participants as _assign_tasks_batch
+except ImportError:
+    from ..services.assignment_engine import assign_task_to_participant, load_participants, load_rules
+
+    def _assign_tasks_batch(
+        tasks_list: list[dict[str, Any]],
+        session: Session,
+        meeting_info: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        participants = load_participants(session)
+        rules = load_rules(session)
+        assigned: list[dict[str, Any]] = []
+
+        for idx, task in enumerate(tasks_list):
+            assignee, source, confidence = assign_task_to_participant(
+                task=task,
+                meeting_info=meeting_info,
+                participants=participants,
+                round_robin_idx=idx,
+            )
+            item = dict(task)
+            item["assignee"] = assignee
+            item["assignee_source"] = source
+            item["assignment_confidence"] = confidence
+            assigned.append(item)
+
+        return assigned
+    
+def _serialize_meeting(session: Session, meeting_id: int) -> dict:
+    meeting = session.get(Meeting, meeting_id)
+    if not meeting:
+        raise HTTPException(status_code=404, detail="meeting not found")
+
+    tasks = session.exec(select(Task).where(Task.meeting_id == meeting_id)).all()
+    info = json.loads(meeting.info) if meeting.info else {}
+    segments = info.pop("segments", [])
+    return {
+        "meeting": {
+            "id": meeting.id,
+            "transcript": meeting.transcript,
+            "created_at": meeting.created_at.isoformat() if meeting.created_at else None,
+        },
+        "tasks": [
+            {
+                "id": task.id,
+                "meeting_id": task.meeting_id,
+                "description": task.description,
+                "assignee": task.assignee,
+                "deadline": task.deadline,
+                "raw": task.raw,
+                "status": task.status,
+                "priority": task.priority,
+            }
+            for task in tasks
+        ],
+        "metadata": info,
+        "segments": segments,
+    }
+
+
+# === Background Processing with Progress Tracking ===
+
+def _update_meeting_progress(meeting_id: int, progress: int, stage: str, message: str = "", status: str = "processing"):
+    """Update meeting info with progress data in database."""
+    from ..db import Session as DBSession
+    try:
+        with DBSession(engine) as session:
+            meeting = session.get(Meeting, meeting_id)
+            if meeting:
+                info = json.loads(meeting.info) if meeting.info else {}
+                info.update({
+                    "status": status,
+                    "progress": progress,
+                    "current_stage": stage,
+                    "message": message
+                })
+                meeting.info = json.dumps(info, ensure_ascii=False)
+                session.add(meeting)
+                session.commit()
+        logger.info(f"[Progress] Meeting {meeting_id}: {progress}% - {stage}: {message}")
+    except Exception as e:
+        logger.error(f"Failed to update progress for meeting {meeting_id}: {e}")
+
+def _build_proxy_metrics(meeting: Meeting, session: Session) -> dict[str, Any]:
+    """
+    Fallback evaluation when gold standard is missing.
+    Produces a diagnostic score from already available pipeline signals.
+    """
+    info = json.loads(meeting.info) if meeting.info else {}
+
+    latest_metrics = session.exec(
+        select(ProcessingMetrics)
+        .where(ProcessingMetrics.meeting_id == meeting.id)
+        .order_by(ProcessingMetrics.created_at.desc())
+    ).first()
+
+    confidence = float(
+        (latest_metrics.transcript_confidence if latest_metrics else None)
+        or info.get("transcript_confidence")
+        or 0.0
+    )
+
+    score = confidence * 100.0
+
+    if info.get("has_diarization"):
+        score += 5.0
+    if info.get("task_fallback_used"):
+        score -= 5.0
+    if info.get("task_provider") == "rules":
+        score -= 10.0
+
+    score = max(0.0, min(100.0, score))
+
+    return {
+        "mode": "proxy",
+        "overall_quality_score": round(score, 2),
+        "transcript_quality_proxy": round(confidence * 100.0, 2),
+        "transcript_confidence": confidence,
+        "has_diarization": bool(info.get("has_diarization", False)),
+        "task_provider": info.get("task_provider"),
+        "task_model": info.get("task_model"),
+        "task_parse_stage": info.get("task_parse_stage"),
+        "task_fallback_used": bool(info.get("task_fallback_used", False)),
+        "task_fallback_merged": bool(info.get("task_fallback_merged", False)),
+        "task_llm_tasks": info.get("task_llm_tasks"),
+        "task_final_tasks": info.get("task_final_tasks"),
+        "segments_count": info.get("segments_count"),
+        "tasks_count": info.get("tasks_count"),
+        "note": "No gold standard found; proxy metrics returned instead of gold-based evaluation.",
+    }
+
+async def _process_meeting_background(meeting_id: int, audio_source: str, filename: str, audio_size_bytes: int | None = None):
+    """Background task to process meeting with progress updates."""
+    start_time = time.time()
+    try:
+        _update_meeting_progress(meeting_id, 0, "Initializing", "Starting processing")
+
+        # Step 1: Transcription
+        _update_meeting_progress(meeting_id, 10, "Loading model", "Loading Whisper model...")
+        transcribe_start = time.time()
+        res = transcribe(audio_source, filename)
+        transcript = res.get("text", "") or ""
+        speaker_transcript = res.get("speaker_transcript") or transcript
+        speaker_aliases = res.get("speaker_aliases") or {}
+        segments = res.get("segments", []) or []
+        language = res.get("language") or "en"
+        confidence = res.get("confidence")
+        has_diarization = bool(res.get("has_diarization", False))
+        transcribe_time = time.time() - transcribe_start
+        duration_sec = max((float(s.get("end", 0.0)) for s in segments), default=0.0)
+        logger.info(f"Transcription completed: {transcribe_time:.2f}s, {len(segments)} segments, language={language}")
+        _update_meeting_progress(meeting_id, 60, "Transcription", f"Transcribed {len(segments)} segments")
+
+        # Step 2: Task extraction (use speaker-labeled transcript if available)
+        _update_meeting_progress(meeting_id, 65, "Loading model", "Loading task extraction model...")
+        task_start = time.time()
+        task_ref = Path(filename).stem if filename else str(meeting_id)
+        tasks_list, task_debug = await extract(
+            speaker_transcript,
+            return_debug=True,
+            trace_id=task_ref,
+            meeting_ref=task_ref,
+            language=language,
+            duration_sec=duration_sec,
+            transcript_confidence=confidence,
+        )
+        task_time = time.time() - task_start
+        logger.info(
+            "Task extraction completed: %d tasks, %.2fs, provider=%s, parse=%s, fallback=%s",
+            len(tasks_list),
+            task_time,
+            task_debug.get("provider"),
+            task_debug.get("parse_stage"),
+            task_debug.get("fallback_used"),
+        )
+        _update_meeting_progress(meeting_id, 85, "Task extraction", f"Found {len(tasks_list)} tasks")
+
+        # Step 3: Assignment
+        _update_meeting_progress(meeting_id, 88, "Assignment", "Assigning tasks to participants")
+        assign_start = time.time()
+        from ..db import Session as DBSession
+        metadata_for_assignment = {
+            "filename": filename,
+            "speaker_aliases": speaker_aliases,
+            "has_diarization": has_diarization,
+            "transcript_confidence": confidence,
+            "task_provider": task_debug.get("provider"),
+            "task_model": task_debug.get("model"),
+            "task_parse_stage": task_debug.get("parse_stage"),
+            "task_fallback_used": task_debug.get("fallback_used"),
+            "task_fallback_merged": task_debug.get("fallback_merged"),
+        }
+        with DBSession(engine) as session:
+            assigned_tasks = _assign_tasks_batch(tasks_list, session, meeting_info=metadata_for_assignment)
+        assign_time = time.time() - assign_start
+        logger.info(f"Assignment completed: {assign_time:.2f}s")
+        _update_meeting_progress(meeting_id, 95, "Assignment", "Tasks assigned")
+
+        # Step 4: Save full results
+        metadata = {
+            "filename": filename,
+            "audio_size_bytes": audio_size_bytes or 0,
+            "language": language,
+            "transcript_confidence": confidence,
+            "transcribe_time_sec": transcribe_time,
+            "task_time_sec": task_time,
+            "assign_time_sec": assign_time,
+            "segments_count": len(segments),
+            
+            "has_diarization": has_diarization,
+            "speaker_aliases": speaker_aliases,
+            "speaker_transcript_present": bool(speaker_transcript),
+            "speaker_transcript_preview": speaker_transcript[:2000],
+            "model_whisper": settings.WHISPER_MODEL,
+            "model_task": task_debug.get("model") or (settings.OPENROUTER_TASK_MODEL if task_debug.get("provider") == "openrouter" else "rules"),
+            "task_provider": task_debug.get("provider"),
+            "task_parse_stage": task_debug.get("parse_stage"),
+            "task_fallback_used": task_debug.get("fallback_used"),
+            "task_fallback_merged": task_debug.get("fallback_merged"),
+            "task_llm_tasks": task_debug.get("llm_tasks"),
+            "task_final_tasks": task_debug.get("final_tasks"),
+            "task_raw_preview": task_debug.get("raw_preview"),
+            "segments": segments,
+            "status": "completed",
+            "progress": 100,
+            "current_stage": "Completed",
+            "message": "All done",
+        }
+        with DBSession(engine) as session:
+            meeting = session.get(Meeting, meeting_id)
+            if meeting:
+                meeting.transcript = transcript
+                meeting.info = json.dumps(metadata, ensure_ascii=False)
+                session.add(meeting)
+                for t in assigned_tasks:
+                    task = Task(
+                        meeting_id=meeting.id,
+                        description=str(t["description"])[:500],
+                        assignee=t.get("assignee"),
+                        deadline=t.get("deadline_hint") or t.get("deadline"),
+                        raw=json.dumps(t, ensure_ascii=False),
+                    )
+                    session.add(task)
+                metrics = ProcessingMetrics(
+                    meeting_id=meeting.id,
+                    audio_size_bytes=audio_size_bytes or 0,
+                    audio_duration_sec=duration_sec,
+                    transcribe_latency_sec=transcribe_time,
+                    task_latency_sec=task_time,
+                    assign_latency_sec=assign_time,
+                    total_latency_sec=time.time() - start_time,
+                    transcript_confidence=confidence,
+                    segments_count=len(segments),
+                    tasks_count=len(assigned_tasks),
+                    language=language,
+                    model_whisper=settings.WHISPER_MODEL,
+                    model_task=task_debug.get("model") or (settings.OPENROUTER_TASK_MODEL if task_debug.get("provider") == "openrouter" else "rules"),
+                    has_diarization=has_diarization,
+                )
+                session.add(metrics)
+                session.commit()
+        total_time = time.time() - start_time
+        logger.info(f"Meeting {meeting_id} fully processed in {total_time:.2f}s")
+
+        try:
+            await trigger_webhooks(meeting_id, assigned_tasks)
+        except Exception as e:
+            logger.warning(f"Webhook trigger failed: {e}")
+
+    except Exception as e:
+        logger.exception(f"Processing failed for meeting {meeting_id}: {e}")
+        _update_meeting_progress(meeting_id, 0, "Error", str(e), status="failed")
+    finally:
+        if audio_source and os.path.exists(audio_source):
+            try:
+                os.unlink(audio_source)
+            except OSError:
+                pass
+
+
+# === Health & Metrics ===
+@router.get("/health")
+def health():
+    return {"status": "ok", "timestamp": time.time()}
+
+
+@router.get("/meetings")
+def list_meetings(limit: int = Query(20, ge=1, le=100), session: Session = Depends(get_session)):
+    meetings = session.exec(select(Meeting).order_by(Meeting.created_at.desc()).limit(limit)).all()
+    return {"meetings": [_serialize_meeting(session, meeting.id) for meeting in meetings if meeting.id is not None]}
+
+
+@router.get("/metrics")
+def get_metrics(limit: int = Query(10, ge=1, le=100), session: Session = Depends(get_session)):
+    """Recent processing metrics (latency, quality scores)."""
+    metrics = session.exec(select(ProcessingMetrics).order_by(ProcessingMetrics.created_at.desc()).limit(limit)).all()
+    return {
+        "metrics": [
+            {
+                "id": m.id,
+                "meeting_id": m.meeting_id,
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+                "audio_size_bytes": m.audio_size_bytes,
+                "audio_duration_sec": m.audio_duration_sec,
+                "transcribe_latency_sec": m.transcribe_latency_sec,
+                "task_latency_sec": m.task_latency_sec,
+                "assign_latency_sec": m.assign_latency_sec,
+                "total_latency_sec": m.total_latency_sec,
+                "transcript_confidence": m.transcript_confidence,
+                "segments_count": m.segments_count,
+                "tasks_count": m.tasks_count,
+                "language": m.language,
+                "model_whisper": m.model_whisper,
+                "model_task": m.model_task,
+                "has_diarization": m.has_diarization,
+            }
+            for m in metrics
+        ]
+    }
+
+@router.patch("/meeting/{meeting_id}/speaker-aliases")
+def update_speaker_aliases(
+    meeting_id: int,
+    payload: SpeakerAliasesPayload,
+    session: Session = Depends(get_session),
+):
+    meeting = session.get(Meeting, meeting_id)
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+
+    info = json.loads(meeting.info) if meeting.info else {}
+    current_aliases = dict(info.get("speaker_aliases", {}) or {})
+
+    for speaker, name in payload.aliases.items():
+        speaker = str(speaker).strip()
+        name = str(name).strip()
+        if speaker and name:
+            current_aliases[speaker] = name
+
+    info["speaker_aliases_manual"] = current_aliases
+    info["speaker_aliases"] = current_aliases
+    meeting.info = json.dumps(info, ensure_ascii=False)
+    session.add(meeting)
+
+    tasks = session.exec(select(Task).where(Task.meeting_id == meeting_id)).all()
+    task_dicts: list[dict[str, Any]] = []
+
+    for t in tasks:
+        raw_task: dict[str, Any] = {}
+        if t.raw:
+            try:
+                raw_task = json.loads(t.raw)
+            except Exception:
+                raw_task = {}
+
+        task_dicts.append(
+            {
+                "description": raw_task.get("description") or t.description,
+                "assignee_hint": raw_task.get("assignee_hint") or raw_task.get("assignee") or t.assignee,
+                "deadline_hint": raw_task.get("deadline_hint") or raw_task.get("deadline") or t.deadline,
+                "speaker_hint": raw_task.get("speaker_hint"),
+                "source_snippet": raw_task.get("source_snippet"),
+                "raw": t.raw,
+            }
+        )
+
+    reassigned = _assign_tasks_batch(task_dicts, session, meeting_info=info)
+
+    for db_task, new_task in zip(tasks, reassigned):
+        db_task.assignee = new_task.get("assignee")
+        db_task.raw = json.dumps(new_task, ensure_ascii=False)
+        session.add(db_task)
+
+    session.commit()
+    return {
+        "ok": True,
+        "meeting_id": meeting_id,
+        "speaker_aliases": current_aliases,
+        "reassigned_tasks": len(reassigned),
+    }
+    
+
+@router.get("/stats")
+def get_stats(session: Session = Depends(get_session)):
+    """Aggregated system-wide statistics for the dashboard."""
+    all_metrics = session.exec(select(ProcessingMetrics)).all()
+    all_meetings = session.exec(select(Meeting)).all()
+    all_tasks = session.exec(select(Task)).all()
+
+    total_meetings = len(all_meetings)
+    total_tasks = len(all_tasks)
+
+    if all_metrics:
+        avg_latency = sum(m.total_latency_sec for m in all_metrics) / len(all_metrics)
+        avg_confidence = sum((m.transcript_confidence or 0.0) for m in all_metrics) / len(all_metrics)
+        avg_tasks_per_meeting = sum(m.tasks_count for m in all_metrics) / len(all_metrics)
+        languages: dict = {}
+        for m in all_metrics:
+            lang = m.language or "unknown"
+            languages[lang] = languages.get(lang, 0) + 1
+        models: dict = {}
+        for m in all_metrics:
+            model = m.model_whisper or "unknown"
+            models[model] = models.get(model, 0) + 1
+    else:
+        avg_latency = avg_confidence = avg_tasks_per_meeting = 0.0
+        languages = {}
+        models = {}
+
+    return {
+        "total_meetings": total_meetings,
+        "total_tasks": total_tasks,
+        "avg_total_latency_sec": round(avg_latency, 2),
+        "avg_transcript_confidence": round(avg_confidence, 3),
+        "avg_tasks_per_meeting": round(avg_tasks_per_meeting, 1),
+        "language_distribution": [
+            {"name": k, "value": v}
+            for k, v in sorted(languages.items(), key=lambda x: -x[1])
+        ],
+        "model_distribution": [
+            {"name": k, "value": v}
+            for k, v in sorted(models.items(), key=lambda x: -x[1])
+        ],
+    }
+
+
+# === Meeting Upload & Processing ===
+@router.post("/upload_meeting")
+async def upload_meeting(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    session: Session = Depends(get_session),
+):
+    """
+    Upload audio file for asynchronous processing.
+    Returns immediate response with meeting_id; use /meeting/{id}/progress to track status.
+    """
+    temp_audio_path = None
+    try:
+        suffix = Path(file.filename or "upload.wav").suffix or ".wav"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            shutil.copyfileobj(file.file, tmp)
+            temp_audio_path = tmp.name
+
+        audio_size_bytes = os.path.getsize(temp_audio_path)
+        filename = file.filename or Path(temp_audio_path).name
+
+        # Create meeting record with initial status
+        initial_info = {
+            "filename": filename,
+            "audio_size_bytes": audio_size_bytes,
+            "status": "processing",
+            "progress": 0,
+            "current_stage": "Uploading",
+            "message": "File received, queued for processing",
+        }
+        meeting = Meeting(transcript="", info=json.dumps(initial_info, ensure_ascii=False))
+        session.add(meeting)
+        session.commit()
+        session.refresh(meeting)
+
+        # Kick off background processing
+        background_tasks.add_task(_process_meeting_background, meeting.id, temp_audio_path, filename, audio_size_bytes)
+
+        return {"meeting_id": meeting.id, "status": "processing", "progress": 0, "message": "Upload successful, processing started"}
+
+    except Exception as e:
+        logger.exception("Upload failed")
+        if temp_audio_path and os.path.exists(temp_audio_path):
+            try:
+                os.unlink(temp_audio_path)
+            except OSError:
+                pass
+        raise HTTPException(status_code=500, detail=f"Processing error: {str(e)}")
+
+
+@router.get("/meeting/{meeting_id}")
+def get_meeting(meeting_id: int, session: Session = Depends(get_session)):
+    return _serialize_meeting(session, meeting_id)
+
+
+@router.get("/meeting/{meeting_id}/progress")
+def get_meeting_progress(meeting_id: int, session: Session = Depends(get_session)):
+    """Get current processing progress for a meeting."""
+    meeting = session.get(Meeting, meeting_id)
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    info = json.loads(meeting.info) if meeting.info else {}
+    return {
+        "meeting_id": meeting_id,
+        "status": info.get("status", "unknown"),
+        "progress": info.get("progress", 0),
+        "current_stage": info.get("current_stage", ""),
+        "message": info.get("message", "")
+    }
+
+@router.get("/meeting/{meeting_id}/proxy-metrics")
+def get_proxy_metrics(meeting_id: int, session: Session = Depends(get_session)):
+    meeting = session.get(Meeting, meeting_id)
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    return build_proxy_metrics(meeting, session)
+
+@router.get("/meeting/{meeting_id}/export")
+def export_meeting(
+    meeting_id: int,
+    format: str = Query("json", pattern="^(json|csv|txt|md)$"),
+    session: Session = Depends(get_session)
+):
+    """Export meeting data in various formats."""
+    meeting = session.get(Meeting, meeting_id)
+    if not meeting:
+        raise HTTPException(status_code=404, detail="meeting not found")
+
+    tasks = session.exec(select(Task).where(Task.meeting_id == meeting_id)).all()
+    metadata = json.loads(meeting.info) if meeting.info else {}
+
+    if format == "json":
+        # Convert datetime to ISO string
+        meeting_data = {
+            "id": meeting.id,
+            "transcript": meeting.transcript,
+            "created_at": meeting.created_at.isoformat() if meeting.created_at else None
+        }
+        return JSONResponse({
+            "meeting": meeting_data,
+            "tasks": [{"description": t.description, "assignee": t.assignee, "deadline": t.deadline} for t in tasks],
+            "metadata": metadata
+        })
+
+    elif format == "txt":
+        content = f"Meeting #{meeting_id}\n"
+        content += f"Date: {meeting.created_at}\n\n"
+        content += "Transcript:\n" + meeting.transcript + "\n\n"
+        content += "Tasks:\n"
+        for i, t in enumerate(tasks, 1):
+            content += f"{i}. {t.description}\n   Assignee: {t.assignee or 'Unassigned'}\n   Deadline: {t.deadline or 'None'}\n\n"
+        return Response(content, media_type="text/plain")
+
+    elif format == "md":
+        content = f"# Meeting #{meeting_id}\n\n"
+        content += f"**Date:** {meeting.created_at}\n\n"
+        content += "## Transcript\n\n" + meeting.transcript + "\n\n"
+        content += "## Tasks\n\n"
+        for i, t in enumerate(tasks, 1):
+            content += f"{i}. **{t.description}**\n"
+            content += f"   - Assignee: {t.assignee or 'Unassigned'}\n"
+            content += f"   - Deadline: {t.deadline or 'None'}\n\n"
+        return Response(content, media_type="text/markdown")
+
+    elif format == "csv":
+        import csv, io
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["Task", "Assignee", "Deadline"])
+        for t in tasks:
+            writer.writerow([t.description, t.assignee or "", t.deadline or ""])
+        return Response(output.getvalue(), media_type="text/csv",
+                        headers={"Content-Disposition": f"attachment; filename=meeting-{meeting_id}.csv"})
+
+
+# === Webhook Configuration ===
+WEBHOOKS_FILE = os.path.join(os.path.dirname(__file__), "..", "..", "webhooks.json")
+
+
+@router.post("/webhooks")
+def configure_webhook(url: str, events: list = None):
+    """Register a webhook URL to receive notifications."""
+    if events is None:
+        events = ["meeting_completed"]
+    try:
+        if os.path.exists(WEBHOOKS_FILE):
+            with open(WEBHOOKS_FILE, "r") as f:
+                hooks = json.load(f)
+        else:
+            hooks = []
+        hooks.append({"url": url, "events": events, "created_at": time.time()})
+        with open(WEBHOOKS_FILE, "w") as f:
+            json.dump(hooks, f, indent=2)
+        return {"ok": True, "webhooks": len(hooks)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+async def trigger_webhooks(meeting_id: int, tasks: list):
+    """Send webhook notifications for completed meetings."""
+    try:
+        if not os.path.exists(WEBHOOKS_FILE):
+            return
+        with open(WEBHOOKS_FILE, "r") as f:
+            hooks = json.load(f)
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            for hook in hooks:
+                if "meeting_completed" in hook["events"]:
+                    await client.post(
+                        hook["url"],
+                        json={
+                            "event": "meeting_completed",
+                            "meeting_id": meeting_id,
+                            "tasks_count": len(tasks),
+                            "tasks": tasks[:10]  # Limit size
+                        }
+                    )
+    except Exception as e:
+        logger.warning(f"Webhook failed: {e}")
+
+
+# === Participant CRUD (unchanged) ===
+@router.post("/participant")
+def create_participant(p: Participant, session: Session = Depends(get_session)):
+    session.add(p)
+    session.commit()
+    session.refresh(p)
+    return p
+
+@router.get("/participants")
+def list_participants(session: Session = Depends(get_session)):
+    return session.exec(select(Participant)).all()
+
+@router.put("/participant/{participant_id}")
+def update_participant(participant_id: int, p: Participant, session: Session = Depends(get_session)):
+    db_p = session.get(Participant, participant_id)
+    if not db_p:
+        raise HTTPException(status_code=404, detail="participant not found")
+    db_p.name = p.name
+    db_p.email = p.email
+    db_p.role = p.role
+    db_p.tags = p.tags
+    session.add(db_p)
+    session.commit()
+    session.refresh(db_p)
+    return db_p
+
+@router.delete("/participant/{participant_id}")
+def delete_participant(participant_id: int, session: Session = Depends(get_session)):
+    p = session.get(Participant, participant_id)
+    if not p:
+        raise HTTPException(status_code=404, detail="participant not found")
+    session.delete(p)
+    session.commit()
+    return {"ok": True}
+
+
+# === Rule CRUD (unchanged) ===
+@router.post("/rule")
+def create_rule(r: Rule, session: Session = Depends(get_session)):
+    session.add(r)
+    session.commit()
+    session.refresh(r)
+    return r
+
+@router.get("/rules")
+def list_rules(session: Session = Depends(get_session)):
+    return session.exec(select(Rule).order_by(Rule.priority)).all()
+
+@router.put("/rule/{rule_id}")
+def update_rule(rule_id: int, r: Rule, session: Session = Depends(get_session)):
+    db_r = session.get(Rule, rule_id)
+    if not db_r:
+        raise HTTPException(status_code=404, detail="rule not found")
+    db_r.name = r.name
+    db_r.kind = r.kind
+    db_r.pattern = r.pattern
+    db_r.priority = r.priority
+    session.add(db_r)
+    session.commit()
+    session.refresh(db_r)
+    return db_r
+
+@router.delete("/rule/{rule_id}")
+def delete_rule(rule_id: int, session: Session = Depends(get_session)):
+    r = session.get(Rule, rule_id)
+    if not r:
+        raise HTTPException(status_code=404, detail="rule not found")
+    session.delete(r)
+    session.commit()
+    return {"ok": True}
