@@ -1,7 +1,7 @@
 experiment_id,task,dataset,seed,model_summary,optimizer,lr,epochs_trained,best_val_accuracy,test_accuracy,precision,recall,mean_iou,notes
-C1,classification,Flowers102,42,SimpleCNN (3 conv blocks + FC),Adam,0.001,15,0.00980392156862745,0.006342494714587738,,,,Base CNN without augmentations
-C2,classification,Flowers102,42,SimpleCNN (3 conv blocks + FC),Adam,0.001,15,0.0,0.011383964872336965,,,,SimpleCNN with augmentations
-C3,classification,Flowers102,42,"ResNet18 (pretrained, frozen backbone)",Adam,0.001,15,0.7156862745098039,0.7127988290778988,,,,"ResNet18 pretrained, backbone frozen, only fc trained"
-C4,classification,Flowers102,42,"ResNet18 (pretrained, partial fine-tune)",Adam,0.0001,15,0.7450980392156863,0.7180029273052528,,,,ResNet18 partial finetune: layer4 + fc trainable
-V1-det,detection,Pascal VOC,42,FasterRCNN_ResNet50_FPN (COCO pretrained),N/A (pretrained inference),,0,,,0.42617941442424623,0.8657756381833154,0.8184891172524621,score_threshold=0.3
-V2-det,detection,Pascal VOC,42,FasterRCNN_ResNet50_FPN (COCO pretrained),N/A (pretrained inference),,0,,,0.6963076748022985,0.7752581237727244,0.8282650363355081,score_threshold=0.7
+C1,classification,Flowers102,42,SimpleCNN (base),Adam,0.001,10,0.22549019607843138,,,,,SimpleCNN without augmentations
+C2,classification,Flowers102,42,SimpleCNN (aug),Adam,0.001,10,0.1696078431372549,,,,,SimpleCNN with augmentations
+C3,classification,Flowers102,42,ResNet18 head-only,Adam,0.001,8,0.6872549019607843,,,,,Frozen backbone
+C4,classification,Flowers102,42,ResNet18 partial fine-tune,Adam,0.0001,8,0.8598039215686275,0.8429012847617499,,,,Unfrozen layer4 + fc
+V1,detection,Pascal VOC,42,FasterRCNN_ResNet50_FPN (pretrained),,,0,,,0.007844721289170457,0.023373661873693545,0.796061895727142,score_threshold=0.3
+V2,detection,Pascal VOC,42,FasterRCNN_ResNet50_FPN (pretrained),,,0,,,0.004733141002524342,0.006651041996579464,0.7962718645731608,score_threshold=0.7

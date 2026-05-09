@@ -3,14 +3,34 @@
   "task": "classification",
   "dataset": "Flowers102",
   "seed": 42,
-  "model_summary": "ResNet18 (pretrained, partial fine-tune)",
+  "model_summary": "ResNet18 partial fine-tune",
   "optimizer": "Adam",
   "lr": 0.0001,
-  "epochs_trained": 15,
-  "best_val_accuracy": 0.7450980392156863,
-  "test_accuracy": 0.7180029273052528,
-  "precision": null,
-  "recall": null,
-  "mean_iou": null,
-  "notes": "ResNet18 partial finetune: layer4 + fc trainable"
+  "epochs_trained": 8,
+  "best_val_accuracy": 0.8598039215686275,
+  "test_accuracy": 0.8429012847617499,
+  "transforms": {
+    "base_transform": [
+      "Resize((224, 224))",
+      "ToTensor()",
+      "Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])"
+    ],
+    "augmentation_transform": [
+      "Resize((224, 224))",
+      "RandomHorizontalFlip(p=0.5)",
+      "RandomRotation(15)",
+      "ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1)",
+      "RandomAffine(degrees=0, translate=(0.1, 0.1))",
+      "ToTensor()",
+      "Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])"
+    ],
+    "resnet_preprocess": [
+      "Resize((224, 224))",
+      "ToTensor()",
+      "Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])"
+    ]
+  },
+  "preprocess": "ImageNet normalization for pretrained ResNet18.",
+  "augmentation": "RandomHorizontalFlip, RandomRotation, ColorJitter, RandomAffine.",
+  "notes": "Best model selected by validation accuracy."
 }
