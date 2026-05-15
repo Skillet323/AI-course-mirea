@@ -97,14 +97,29 @@ def evaluate_tasks(pred_tasks: List[dict], gold_tasks: List[dict]) -> Dict[str, 
     pred_tasks = pred_tasks or []
     gold_tasks = gold_tasks or []
 
+    # Build full similarity matrix and match greedily from highest similarity.
+    # This avoids early low-quality matches blocking better later ones.
+    MATCH_THRESHOLD = 0.22  # lowered: gold=formal/abstract, pred=colloquial transcript
+
+    sim_pairs: List[Tuple[float, int, int]] = []  # (score, pred_i, gold_j)
+    for i, pred in enumerate(pred_tasks):
+        pd = _task_desc(pred)
+        for j, gold in enumerate(gold_tasks):
+            score = _sim(pd, _task_desc(gold))
+            if score >= MATCH_THRESHOLD:
+                sim_pairs.append((score, i, j))
+
+    sim_pairs.sort(key=lambda x: -x[0])  # highest score first
+
     matches: Dict[int, int] = {}
+    used_pred: set[int] = set()
     used_gold: set[int] = set()
 
-    for i, pred in enumerate(pred_tasks):
-        idx, score = _best_match(_task_desc(pred), gold_tasks, used_gold)
-        if idx >= 0 and score >= 0.28:
-            matches[i] = idx
-            used_gold.add(idx)
+    for score, i, j in sim_pairs:
+        if i not in used_pred and j not in used_gold:
+            matches[i] = j
+            used_pred.add(i)
+            used_gold.add(j)
 
     tp = len(matches)
     fp = max(0, len(pred_tasks) - tp)

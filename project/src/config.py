@@ -18,13 +18,14 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "sqlite:///./meeting_secretary.db"
 
     # ── Whisper ASR ──────────────────────────────────────────────────────────
-    WHISPER_MODEL: str = "small"         # tiny | base | small | medium | large-v3
+    WHISPER_MODEL: str = "medium"         # tiny | base | small | medium | large-v3
     WHISPER_DEVICE: str = "cpu"          # "cuda" | "cpu"
     WHISPER_COMPUTE_TYPE: str = "int8"   # int8 (CPU, default) | float16 (GPU only)
 
     # ── Task extraction ───────────────────────────────────────────────────────
     # TASK_PROVIDER selects the extraction backend:
     #   "openrouter"  → call OpenRouter API (default; best quality, free tier available)
+    #   "nvidia"      → call NVIDIA Build API (fallback)
     #   "rules"       → pure heuristic, no network, useful for offline/CI runs
     TASK_PROVIDER: str = "openrouter"
 
@@ -35,6 +36,16 @@ class Settings(BaseSettings):
     #   "mistralai/mistral-7b-instruct:free"
     OPENROUTER_API_KEY: str = ""
     OPENROUTER_TASK_MODEL: str = "openrouter/free"
+
+    # ── NVIDIA Build API settings (used when TASK_PROVIDER == "nvidia") ───────
+    NVIDIA_API_KEY: str = ""
+    NVIDIA_TASK_MODEL: str = "meta/llama-4-maverick-17b-128e-instruct"
+    # Available models on build.nvidia.com (free tier):
+    #   google/gemma-3n-e2b-it
+    #   minimaxai/minimax-m2.7
+    #   stepfun-ai/step-3.5-flash
+    #   meta/llama-4-maverick-17b-128e-instruct
+    NVIDIA_BASE_URL: str = "https://integrate.api.nvidia.com/v1"
 
     # Legacy T5 fields — kept for backwards compatibility, no longer used by default
     TASK_MODEL: str = "google/flan-t5-base"

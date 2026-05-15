@@ -91,7 +91,7 @@ def _tokenize(text: str) -> list[str]:
     return [t for t in text.split() if t and t not in STOPWORDS and len(t) > 2]
 
 
-def _task_supported_by_transcript(description: str, transcript: str, min_overlap: float = 0.15) -> bool:
+def _task_supported_by_transcript(description: str, transcript: str, min_overlap: float = 0.10) -> bool:
     """
     Keep only tasks with some lexical support in the current transcript.
     This is intentionally strict for short/noisy transcripts.
@@ -167,19 +167,59 @@ def _looks_like_task(sentence: str) -> bool:
         return False
 
     markers = [
+        # English action verbs / modal phrases
         "should",
         "must",
         "need to",
         "needs to",
         "please",
         "action item",
+        "action point",
         "task",
         "to do",
+        "todo",
         "follow up",
+        "follow-up",
         "let s",
         "let us",
         "have to",
         "required to",
+        "going to",
+        "will have",
+        "will need",
+        "will be responsible",
+        "take care of",
+        "make sure",
+        "ensure that",
+        "prepare",
+        "design",
+        "develop",
+        "implement",
+        "create",
+        "write",
+        "send",
+        "schedule",
+        "arrange",
+        "contact",
+        "coordinate",
+        "review",
+        "check",
+        "update",
+        "look into",
+        "look at",
+        "work on",
+        "put together",
+        "come up with",
+        "figure out",
+        "set up",
+        "keep track",
+        "make a decision",
+        "responsible for",
+        "in charge of",
+        "assigned to",
+        "by next",
+        "before next",
+        # Russian
         "нужно",
         "надо",
         "нужна",
@@ -196,6 +236,12 @@ def _looks_like_task(sentence: str) -> bool:
         "назначить",
         "созвониться",
         "позвонить",
+        "разработать",
+        "написать",
+        "составить",
+        "организовать",
+        "предоставить",
+        "убедиться",
     ]
     return any(marker in s for marker in markers)
 
@@ -571,15 +617,7 @@ async def _call_openrouter(
                         trace_id or "-",
                         f", Retry-After={retry_after}" if retry_after else "",
                     )
-                    return [], {
-                        "provider": "openrouter",
-                        "model": model,
-                        "raw_preview": None,
-                        "parse_stage": None,
-                        "parsed_tasks": 0,
-                        "fallback_used": True,
-                        "error": "rate_limited",
-                    }
+                    raise RuntimeError(f"OpenRouter rate limited (429)")
 
                 if resp.status_code in (408, 502, 503, 529):
                     wait_sec = BASE_BACKOFF_SEC * (2**attempt) + random.uniform(0, 0.75)
@@ -707,10 +745,27 @@ async def extract_tasks(
         return (fallback_tasks, debug) if return_debug else fallback_tasks
 
     if not llm_tasks:
-        logger.info("[TASK][%s] LLM returned no tasks; using fallback", trace_id or "-")
+        logger.info("[TASK][%s] LLM returned no tasks; trying NVIDIA fallback", trace_id or "-")
         debug["llm_tasks"] = 0
-        debug["fallback_used"] = True
-        return (fallback_tasks, debug) if return_debug else fallback_tasks
+        # Try NVIDIA before giving up on rule-based fallback
+        if provider == "openrouter" and getattr(settings, "NVIDIA_API_KEY", ""):
+            try:
+                llm_tasks, llm_debug = await _call_nvidia(
+                    transcript,
+                    trace_id=trace_id,
+                    meeting_ref=meeting_ref,
+                    language=language,
+                    duration_sec=duration_sec,
+                    transcript_confidence=transcript_confidence,
+                )
+                debug.update(llm_debug)
+                debug["fallback_from"] = "openrouter_empty"
+                logger.info("[TASK][%s] NVIDIA fallback returned %d tasks", trace_id or "-", len(llm_tasks))
+            except Exception as nvidia_exc:
+                logger.warning("[TASK][%s] NVIDIA fallback failed: %s", trace_id or "-", nvidia_exc)
+        if not llm_tasks:
+            debug["fallback_used"] = True
+            return (fallback_tasks, debug) if return_debug else fallback_tasks
 
     debug["llm_tasks"] = len(llm_tasks)
 

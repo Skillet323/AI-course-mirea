@@ -1,0 +1,61 @@
+# syntax=docker/dockerfile:1.7
+
+# ── Stage 1: Build frontend ─────────────────────────────────────────────────
+FROM node:20-alpine AS frontend-build
+WORKDIR /app/frontend
+COPY frontend/package*.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
+
+# ── Stage 2: GPU runtime with CUDA 13.0 ─────────────────────────────────────
+# Using nvidia/cuda base image for GPU support
+FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04 AS runtime
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    DEBIAN_FRONTEND=noninteractive
+
+WORKDIR /app/project
+
+# Install system dependencies including ffmpeg for torchcodec
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3.11 \
+        python3-pip \
+        python3-dev \
+        build-essential \
+        ffmpeg \
+        git \
+        libsndfile1 \
+        libportaudio2 \
+        curl \
+        wget \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install PyTorch with CUDA 13.0 support
+RUN pip3 install --upgrade pip && \
+    pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
+
+# Copy requirements and install Python dependencies
+COPY requirements.txt /app/project/requirements.txt
+RUN pip3 install -r requirements.txt
+
+# Copy application code
+COPY src /app/project/src
+COPY data /app/project/data
+COPY configs /app/project/configs
+COPY scripts /app/project/scripts
+COPY tests /app/project/tests
+COPY artifacts /app/project/artifacts
+COPY README.md /app/project/README.md
+COPY report.md /app/project/report.md
+COPY self-checklist.md /app/project/self-checklist.md
+COPY .env.example /app/project/.env.example
+
+# Copy built frontend from stage 1
+COPY --from=frontend-build /app/frontend/dist /app/project/frontend/dist
+
+EXPOSE 8000
+
+CMD ["python3", "-m", "uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -11,6 +11,5 @@
 - `01_eda.ipynb`
 - `02_task_extraction.ipynb`
 - `03_model_comparison.ipynb`
-- `04_metrics_dashboard.ipynb`
 
 Если ноутбуки появляются, в отчёте лучше явно ссылаться на них.

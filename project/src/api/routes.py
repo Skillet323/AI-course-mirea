@@ -316,8 +316,71 @@ async def _process_meeting_background(meeting_id: int, audio_source: str, filena
 
 # === Health & Metrics ===
 @router.get("/health")
-def health():
-    return {"status": "ok", "timestamp": time.time()}
+def health(session: Session = Depends(get_session)):
+    """Health check endpoint for monitoring and readiness probes."""
+    try:
+        session.exec(select(Meeting)).first()
+        db_status = "ok"
+    except Exception as e:
+        logger.error("Health check DB error: %s", e)
+        db_status = "error"
+    return {
+        "status": "ok",
+        "timestamp": time.time(),
+        "db": db_status,
+        "service": "meeting-secretary",
+        "version": "1.0.0",
+    }
+
+
+class PredictRequest(BaseModel):
+    """Request body for /predict endpoint."""
+    transcript: str
+    language: str = "en"
+    duration_sec: float = 0.0
+    meeting_ref: str = "adhoc"
+
+
+@router.post("/predict")
+async def predict(body: PredictRequest):
+    """
+    Primary ML prediction endpoint.
+
+    Accepts a meeting transcript and returns extracted action items
+    using the configured task extraction model (OpenRouter LLM or
+    rule-based fallback when no API key is set).
+
+    For full audio pipeline, use POST /upload_meeting instead.
+    """
+    if not body.transcript or not body.transcript.strip():
+        raise HTTPException(status_code=422, detail="transcript must not be empty")
+
+    logger.info("[PREDICT] meeting_ref=%s words=%d", body.meeting_ref, len(body.transcript.split()))
+
+    try:
+        tasks, debug = await extract(
+            body.transcript,
+            return_debug=True,
+            meeting_ref=body.meeting_ref,
+            language=body.language,
+            duration_sec=body.duration_sec,
+        )
+    except Exception as exc:
+        logger.error("[PREDICT] Extraction error: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Extraction failed: {exc}")
+
+    logger.info("[PREDICT] %d tasks, provider=%s fallback=%s",
+                len(tasks), debug.get("provider"), debug.get("fallback_used"))
+
+    return {
+        "tasks": tasks,
+        "task_count": len(tasks),
+        "model": debug.get("model"),
+        "provider": debug.get("provider"),
+        "fallback_used": debug.get("fallback_used", False),
+        "parse_stage": debug.get("parse_stage"),
+        "meeting_ref": body.meeting_ref,
+    }
 
 
 @router.get("/meetings")

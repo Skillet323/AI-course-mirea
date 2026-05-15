@@ -12,7 +12,7 @@ def test_assign_by_assignee_hint():
         "assignee_hint": "Alice Smith",
     }
 
-    assignee, source, confidence = assign_task_to_participant(task, None, participants, 0)
+    assignee, source, confidence = assign_task_to_participant(task, None, participants, [], 0)
 
     assert assignee == "Alice Smith"
     assert source == "assignee_hint"
@@ -30,7 +30,7 @@ def test_assign_by_speaker_alias():
         "speaker_hint": "SPEAKER_01",
     }
 
-    assignee, source, confidence = assign_task_to_participant(task, meeting_info, participants, 0)
+    assignee, source, confidence = assign_task_to_participant(task, meeting_info, participants, [], 0)
 
     assert assignee == "Bob Jones"
     assert source == "speaker_alias"
@@ -39,7 +39,7 @@ def test_assign_by_speaker_alias():
 
 def test_unassigned_when_no_participants():
     task = {"description": "Prepare the summary report"}
-    assignee, source, confidence = assign_task_to_participant(task, None, [], 0)
+    assignee, source, confidence = assign_task_to_participant(task, None, [], [], 0)
 
     assert assignee is None
     assert source == "unassigned"
