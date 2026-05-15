@@ -117,6 +117,15 @@ def _update_meeting_progress(meeting_id: int, progress: int, stage: str, message
     except Exception as e:
         logger.error(f"Failed to update progress for meeting {meeting_id}: {e}")
 
+
+def _select_task_model_name(task_debug: dict[str, Any]) -> str:
+    provider = task_debug.get("provider")
+    if provider == "openrouter":
+        return task_debug.get("model") or settings.OPENROUTER_TASK_MODEL
+    if provider == "nvidia":
+        return task_debug.get("model") or settings.NVIDIA_TASK_MODEL
+    return "rules"
+
 def _build_proxy_metrics(meeting: Meeting, session: Session) -> dict[str, Any]:
     """
     Fallback evaluation when gold standard is missing.
@@ -221,7 +230,7 @@ async def _process_meeting_background(meeting_id: int, audio_source: str, filena
             "has_diarization": has_diarization,
             "transcript_confidence": confidence,
             "task_provider": task_debug.get("provider"),
-            "task_model": task_debug.get("model"),
+            "task_model": _select_task_model_name(task_debug),
             "task_parse_stage": task_debug.get("parse_stage"),
             "task_fallback_used": task_debug.get("fallback_used"),
             "task_fallback_merged": task_debug.get("fallback_merged"),
@@ -248,7 +257,7 @@ async def _process_meeting_background(meeting_id: int, audio_source: str, filena
             "speaker_transcript_present": bool(speaker_transcript),
             "speaker_transcript_preview": speaker_transcript[:2000],
             "model_whisper": settings.WHISPER_MODEL,
-            "model_task": task_debug.get("model") or (settings.OPENROUTER_TASK_MODEL if task_debug.get("provider") == "openrouter" else "rules"),
+            "model_task": _select_task_model_name(task_debug),
             "task_provider": task_debug.get("provider"),
             "task_parse_stage": task_debug.get("parse_stage"),
             "task_fallback_used": task_debug.get("fallback_used"),
@@ -290,7 +299,7 @@ async def _process_meeting_background(meeting_id: int, audio_source: str, filena
                     tasks_count=len(assigned_tasks),
                     language=language,
                     model_whisper=settings.WHISPER_MODEL,
-                    model_task=task_debug.get("model") or (settings.OPENROUTER_TASK_MODEL if task_debug.get("provider") == "openrouter" else "rules"),
+                    model_task=_select_task_model_name(task_debug),
                     has_diarization=has_diarization,
                 )
                 session.add(metrics)

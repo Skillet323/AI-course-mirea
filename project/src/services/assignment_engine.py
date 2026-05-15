@@ -137,6 +137,10 @@ def _resolve_speaker_hint(task: dict, meeting_info: Optional[dict], participants
     if _match_name(participants, speaker_hint_str):
         return speaker_hint_str
 
+    # Preserve raw speaker labels (e.g. SPEAKER_01, A) even when we have no participant registry.
+    if re.fullmatch(r"(?:SPEAKER_\d+|Speaker\s+\d+|[A-Z])", speaker_hint_str):
+        return speaker_hint_str
+
     return None
 
 
@@ -217,6 +221,7 @@ def assign_task_to_participant(
         p = _match_name(participants, speaker_resolved)
         if p:
             return p.name, "speaker_alias", 0.95
+        return speaker_resolved, "speaker_resolved", 0.85
 
     assignee_hint = task.get("assignee_hint")
     p = _match_name(participants, assignee_hint)

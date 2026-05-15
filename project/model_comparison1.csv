@@ -1,2 +1,0 @@
-model,status,n_ok,n_total,avg_task_f1,avg_precision,avg_recall,avg_assignee_accuracy,avg_deadline_accuracy,avg_hallucination_rate,avg_predicted_tasks,avg_matched_tasks,avg_latency_sec,avg_raw_chars,n_rate_limited,n_forbidden,n_parse_failed,notes
-openrouter/free,ok,2,13,0.0,0.0,0.0,,,0.0,2.5,0.0,13.849,470.0,0,0,11,

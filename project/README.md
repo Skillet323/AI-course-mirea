@@ -138,6 +138,12 @@ cd project
 docker build -t meeting-secretary .
 docker run --rm -p 8000:8000 --env-file .env meeting-secretary
 ```
+Gpu вариант:
+```bash
+cd project
+docker build -f Dockerfile.gpu -t meeting-secretary-gpu .
+docker run --rm --gpus all -p 8000:8000 --env-file .env meeting-secretary-gpu
+```
 
 После этого:
 

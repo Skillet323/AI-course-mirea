@@ -1,19 +1,14 @@
-"""
-Task extraction with OpenRouter + robust parser + strict rule-based fallback.
-
-This module is designed for two workflows:
-1) runtime extraction in the backend
-2) batch generation of pseudo-gold AMI JSON files
+"""Task extraction with OpenRouter + NVIDIA fallback + strict rule-based fallback.
 
 Returned task dicts are normalized to:
     {
         "description": str,
-        "assignee_hint": str|None,
-        "deadline_hint": str|None,
-        "speaker_hint": str|None,      # optional
-        "source": "openrouter"|"openrouter_text"|"rule_based",
-        "source_snippet": str|None,    # optional
-        "model": str|None,             # only for LLM outputs
+        "assignee_hint": str | None,
+        "deadline_hint": str | None,
+        "speaker_hint": str | None,      # optional
+        "source": "openrouter" | "nvidia" | "openrouter_text" | "rule_based" | "trained_classifier",
+        "source_snippet": str | None,    # optional
+        "model": str | None,             # only for LLM outputs
     }
 """
 
@@ -29,11 +24,14 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from ..config import settings
+from .task_classifier import predict_candidates as predict_trained_candidates
 
 logger = logging.getLogger(__name__)
 
-_OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+_NVIDIA_BASE_URL_DEFAULT = "https://integrate.api.nvidia.com/v1"
 MAX_OPENROUTER_RETRIES = 3
+MAX_NVIDIA_RETRIES = 3
 BASE_BACKOFF_SEC = 2.5
 
 # ---------------------------------------------------------------------------
@@ -66,14 +64,7 @@ def _preview(text: str, limit: int = 800) -> str:
 
 
 def _split_speaker_prefix(text: str) -> tuple[Optional[str], str]:
-    """
-    Split speaker-labeled lines such as:
-      - SPEAKER_00: hello
-      - Speaker 1: hello
-      - A: hello
-      - Laura: hello
-      - David Smith: hello
-    """
+    """Split speaker-labeled lines such as `SPEAKER_00: hello` or `Alice: hello`."""
     m = re.match(
         r"^\s*((?:SPEAKER_\d+)|(?:Speaker\s+\d+)|(?:[A-Z])|(?:[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2}))\s*:\s*(.+)$",
         text or "",
@@ -92,10 +83,7 @@ def _tokenize(text: str) -> list[str]:
 
 
 def _task_supported_by_transcript(description: str, transcript: str, min_overlap: float = 0.10) -> bool:
-    """
-    Keep only tasks with some lexical support in the current transcript.
-    This is intentionally strict for short/noisy transcripts.
-    """
+    """Keep only tasks with some lexical support in the current transcript."""
     desc_tokens = set(_tokenize(description))
     tr_tokens = set(_tokenize(transcript))
 
@@ -124,6 +112,13 @@ def _guess_deadline(sentence: str) -> Optional[str]:
     return _normalize_space(m.group(1)) if m else None
 
 
+_ASSIGNEE_DEADLINE_TOKENS = {
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+    "понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье",
+    "today", "tomorrow", "tonight", "next", "week", "month",
+}
+
+
 def _guess_assignee(sentence: str) -> Optional[str]:
     patterns = [
         r"(?:for|to|assigned to|by)\s+([A-ZА-ЯЁ][a-zа-яё]+(?:\s+[A-ZА-ЯЁ][a-zа-яё]+)?)",
@@ -131,9 +126,14 @@ def _guess_assignee(sentence: str) -> Optional[str]:
         r"@([\w.-]+)",
     ]
     for pattern in patterns:
-        m = re.search(pattern, sentence)
-        if m:
-            return _normalize_space(m.group(1))
+        m = re.search(pattern, sentence, flags=re.IGNORECASE)
+        if not m:
+            continue
+        candidate = _normalize_space(m.group(1))
+        low = normalize_text(candidate)
+        if not candidate or low in _ASSIGNEE_DEADLINE_TOKENS:
+            continue
+        return candidate
     return None
 
 
@@ -274,10 +274,7 @@ def _is_meta_task(text: str) -> bool:
 
 
 def _normalize_assignee_hint(hint: Any) -> Optional[str]:
-    """
-    Keep only plausible specific names/roles.
-    Drop generic instruction-like text.
-    """
+    """Keep only plausible specific names/roles and drop generic pseudo-assignees."""
     if hint is None:
         return None
 
@@ -313,8 +310,6 @@ def _normalize_assignee_hint(hint: Any) -> Optional[str]:
         return None
 
     if any(marker in lower for marker in generic_markers):
-        # Keep if it is a short title-like role from the transcript,
-        # otherwise drop generic pseudo-assignees.
         if not re.fullmatch(r"[A-Za-zА-ЯЁ][\w.-]+(?:\s+[A-Za-zА-ЯЁ][\w.-]+)?", text):
             return None
 
@@ -333,7 +328,6 @@ def _add_task(tasks: List[Dict[str, Any]], item: Dict[str, Any], transcript: str
     if not desc or _is_meta_task(desc):
         return
 
-    # For short/noisy transcripts, be stricter.
     if not _task_supported_by_transcript(desc, transcript):
         return
 
@@ -358,6 +352,8 @@ def _add_task(tasks: List[Dict[str, Any]], item: Dict[str, Any], transcript: str
         out["source_snippet"] = source_snippet[:120]
     if item.get("model"):
         out["model"] = item["model"]
+    if item.get("score") is not None:
+        out["score"] = item.get("score")
 
     tasks.append(out)
 
@@ -365,6 +361,7 @@ def _add_task(tasks: List[Dict[str, Any]], item: Dict[str, Any], transcript: str
 # ---------------------------------------------------------------------------
 # Rule-based fallback
 # ---------------------------------------------------------------------------
+
 
 def _extract_tasks_simple(transcript: str) -> List[Dict[str, Any]]:
     tasks: List[Dict[str, Any]] = []
@@ -397,6 +394,11 @@ def _extract_tasks_simple(transcript: str) -> List[Dict[str, Any]]:
         if _task_supported_by_transcript(item["description"], transcript):
             tasks.append(item)
 
+    classifier_tasks = predict_trained_candidates(transcript, threshold=0.70, max_items=8)
+    for cand in classifier_tasks:
+        cand["source"] = "trained_classifier"
+        tasks.append(cand)
+
     unique: List[Dict[str, Any]] = []
     seen: set[str] = set()
     for t in tasks:
@@ -409,13 +411,12 @@ def _extract_tasks_simple(transcript: str) -> List[Dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# LLM output parsing
+# LLM parsing helpers
 # ---------------------------------------------------------------------------
 
-def _collect_json_tasks(node: Any, tasks: List[Dict[str, Any]], transcript: str) -> None:
-    """
-    Recursively collect task-like objects from arbitrarily nested JSON.
-    """
+
+def _collect_json_tasks(node: Any, tasks: List[Dict[str, Any]], transcript: str, source: str) -> None:
+    """Recursively collect task-like objects from arbitrarily nested JSON."""
     if isinstance(node, dict):
         desc = str(node.get("description") or node.get("task") or "").strip()
         if desc and not _is_meta_task(desc) and _task_supported_by_transcript(desc, transcript):
@@ -423,21 +424,22 @@ def _collect_json_tasks(node: Any, tasks: List[Dict[str, Any]], transcript: str)
                 "description": desc[:500],
                 "assignee_hint": _normalize_assignee_hint(node.get("assignee_hint") or node.get("assignee")),
                 "deadline_hint": _normalize_deadline_hint(node.get("deadline_hint") or node.get("deadline")),
-                "source": "openrouter",
+                "source": source,
             }
+            if node.get("speaker_hint"):
+                item["speaker_hint"] = _normalize_space(str(node["speaker_hint"]))
             if node.get("source_snippet"):
                 item["source_snippet"] = str(node["source_snippet"])[:120]
             tasks.append(item)
 
-        # Recurse only into non-scalar content and ignore task metadata fields.
         for key, value in node.items():
-            if key in {"description", "task", "assignee_hint", "assignee", "deadline_hint", "deadline", "source_snippet", "evidence"}:
+            if key in {"description", "task", "assignee_hint", "assignee", "deadline_hint", "deadline", "source_snippet", "evidence", "speaker_hint"}:
                 continue
-            _collect_json_tasks(value, tasks, transcript)
+            _collect_json_tasks(value, tasks, transcript, source)
 
     elif isinstance(node, list):
         for item in node:
-            _collect_json_tasks(item, tasks, transcript)
+            _collect_json_tasks(item, tasks, transcript, source)
 
     elif isinstance(node, str):
         text = _normalize_space(node)
@@ -449,12 +451,12 @@ def _collect_json_tasks(node: Any, tasks: List[Dict[str, Any]], transcript: str)
                     "description": text[:500],
                     "assignee_hint": _guess_assignee(text),
                     "deadline_hint": _guess_deadline(text),
-                    "source": "openrouter_text",
+                    "source": source,
                 }
             )
 
 
-def _parse_llm_output(raw: str, transcript: str, *, trace_id: str | None = None) -> tuple[List[Dict[str, Any]], dict[str, Any]]:
+def _parse_llm_output(raw: str, transcript: str) -> tuple[List[Dict[str, Any]], dict[str, Any]]:
     debug: dict[str, Any] = {
         "raw": raw,
         "raw_preview": _preview(raw, 1200),
@@ -480,8 +482,7 @@ def _parse_llm_output(raw: str, transcript: str, *, trace_id: str | None = None)
             continue
 
         tasks: List[Dict[str, Any]] = []
-        _collect_json_tasks(parsed, tasks, transcript)
-
+        _collect_json_tasks(parsed, tasks, transcript, source="openrouter")
         if tasks:
             unique: List[Dict[str, Any]] = []
             seen: set[str] = set()
@@ -526,7 +527,7 @@ def _parse_llm_output(raw: str, transcript: str, *, trace_id: str | None = None)
 
 
 # ---------------------------------------------------------------------------
-# OpenRouter call
+# OpenRouter / NVIDIA calls
 # ---------------------------------------------------------------------------
 
 _SYSTEM_PROMPT = (
@@ -563,20 +564,41 @@ _USER_TEMPLATE = (
     "Return only a JSON array."
 )
 
-async def _call_openrouter(
+
+def _chat_completions_url(base_url: str) -> str:
+    base = (base_url or "").rstrip("/")
+    if base.endswith("/chat/completions"):
+        return base
+    return f"{base}/chat/completions"
+
+
+def _backend_debug(provider: str, model: str, raw: str, parse_debug: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "provider": provider,
+        "model": model,
+        "raw_preview": _preview(raw, 1200),
+        "parse_stage": parse_debug.get("parse_stage"),
+        "parsed_tasks": parse_debug.get("parsed_tasks", 0),
+        "fallback_used": False,
+    }
+
+
+async def _call_chat_backend(
     transcript: str,
     *,
+    provider: str,
+    base_url: str,
+    api_key: str,
+    model: str,
     trace_id: str | None = None,
     meeting_ref: str | None = None,
     language: str = "en",
     duration_sec: float | None = None,
     transcript_confidence: float | None = None,
+    retries: int = 3,
 ) -> tuple[List[Dict[str, Any]], dict[str, Any]]:
-    api_key: str = getattr(settings, "OPENROUTER_API_KEY", "") or ""
     if not api_key:
-        raise RuntimeError("OPENROUTER_API_KEY is not set")
-
-    model: str = getattr(settings, "OPENROUTER_TASK_MODEL", "openrouter/free") or "openrouter/free"
+        raise RuntimeError(f"{provider} API key is not set")
 
     user_content = _USER_TEMPLATE.format(
         meeting_ref=meeting_ref or "unknown",
@@ -599,84 +621,157 @@ async def _call_openrouter(
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
-        "HTTP-Referer": "https://github.com/your-org/meeting-secretary",
-        "X-Title": "Meeting Secretary",
     }
+    if provider == "openrouter":
+        headers["HTTP-Referer"] = "https://github.com/your-org/meeting-secretary"
+        headers["X-Title"] = "Meeting Secretary"
 
+    url = _chat_completions_url(base_url)
     last_error: Exception | None = None
+    retryable_statuses = {408, 425, 429, 500, 502, 503, 504, 529}
 
     async with httpx.AsyncClient(timeout=60.0) as client:
-        for attempt in range(MAX_OPENROUTER_RETRIES):
+        for attempt in range(retries):
             try:
-                resp = await client.post(_OPENROUTER_URL, json=payload, headers=headers)
+                resp = await client.post(url, json=payload, headers=headers)
 
                 if resp.status_code == 429:
                     retry_after = resp.headers.get("Retry-After")
+                    if retry_after:
+                        try:
+                            wait_sec = float(retry_after)
+                        except ValueError:
+                            wait_sec = BASE_BACKOFF_SEC * (2**attempt)
+                    else:
+                        wait_sec = BASE_BACKOFF_SEC * (2**attempt)
+                    wait_sec += random.uniform(0, 0.75)
                     logger.warning(
-                        "[TASK][%s] OpenRouter 429 rate limit%s",
+                        "[TASK][%s] %s 429 rate limit%s, retry in %.1fs (attempt %d/%d)",
                         trace_id or "-",
+                        provider.capitalize(),
                         f", Retry-After={retry_after}" if retry_after else "",
+                        wait_sec,
+                        attempt + 1,
+                        retries,
                     )
-                    raise RuntimeError(f"OpenRouter rate limited (429)")
+                    if attempt < retries - 1:
+                        await asyncio.sleep(wait_sec)
+                        continue
+                    raise RuntimeError(f"{provider} rate limited (429)")
 
-                if resp.status_code in (408, 502, 503, 529):
+                if resp.status_code in retryable_statuses:
                     wait_sec = BASE_BACKOFF_SEC * (2**attempt) + random.uniform(0, 0.75)
                     logger.warning(
-                        "[TASK][%s] OpenRouter transient error %s, retry in %.1fs (attempt %d/%d)",
+                        "[TASK][%s] %s transient error %s, retry in %.1fs (attempt %d/%d)",
                         trace_id or "-",
+                        provider.capitalize(),
                         resp.status_code,
                         wait_sec,
                         attempt + 1,
-                        MAX_OPENROUTER_RETRIES,
+                        retries,
                     )
-                    await asyncio.sleep(wait_sec)
-                    continue
+                    if attempt < retries - 1:
+                        await asyncio.sleep(wait_sec)
+                        continue
+                    resp.raise_for_status()
 
-                resp.raise_for_status()
+                if 400 <= resp.status_code < 500:
+                    resp.raise_for_status()
+
                 data = resp.json()
-
                 actual_model = data.get("model", model)
-                raw = data["choices"][0]["message"]["content"] or "[]"
+                raw = (((data.get("choices") or [{}])[0]).get("message") or {}).get("content") or "[]"
 
-                logger.info("[TASK][%s] OpenRouter model used: %s", trace_id or "-", actual_model)
-                logger.info("[TASK][%s] OpenRouter raw output:\n%s", trace_id or "-", raw)
+                logger.info("[TASK][%s] %s model used: %s", trace_id or "-", provider.capitalize(), actual_model)
+                logger.info("[TASK][%s] %s raw output:\n%s", trace_id or "-", provider.capitalize(), raw)
 
-                tasks, parse_debug = _parse_llm_output(raw, transcript, trace_id=trace_id)
+                tasks, parse_debug = _parse_llm_output(raw, transcript)
                 for t in tasks:
                     t["model"] = actual_model
+                    t["source"] = provider
 
-                debug = {
-                    "provider": "openrouter",
-                    "model": actual_model,
-                    "raw_preview": _preview(raw, 1200),
-                    "parse_stage": parse_debug.get("parse_stage"),
-                    "parsed_tasks": parse_debug.get("parsed_tasks", 0),
-                    "fallback_used": False,
-                }
+                debug = _backend_debug(provider, actual_model, raw, parse_debug)
                 return tasks, debug
 
             except Exception as exc:
                 last_error = exc
-                if attempt < MAX_OPENROUTER_RETRIES - 1:
+                if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code not in retryable_statuses:
+                    break
+                if attempt < retries - 1:
                     wait_sec = BASE_BACKOFF_SEC * (2**attempt) + random.uniform(0, 0.75)
                     logger.warning(
-                        "[TASK][%s] OpenRouter error, retry in %.1fs (attempt %d/%d): %s",
+                        "[TASK][%s] %s error, retry in %.1fs (attempt %d/%d): %s",
                         trace_id or "-",
+                        provider.capitalize(),
                         wait_sec,
                         attempt + 1,
-                        MAX_OPENROUTER_RETRIES,
+                        retries,
                         exc,
                     )
                     await asyncio.sleep(wait_sec)
                     continue
                 break
 
-    raise RuntimeError(f"OpenRouter failed after retries: {last_error}")
+    raise RuntimeError(f"{provider} failed after retries: {last_error}")
+
+
+async def _call_openrouter(
+    transcript: str,
+    *,
+    trace_id: str | None = None,
+    meeting_ref: str | None = None,
+    language: str = "en",
+    duration_sec: float | None = None,
+    transcript_confidence: float | None = None,
+) -> tuple[List[Dict[str, Any]], dict[str, Any]]:
+    api_key: str = getattr(settings, "OPENROUTER_API_KEY", "") or ""
+    model: str = getattr(settings, "OPENROUTER_TASK_MODEL", "openrouter/free") or "openrouter/free"
+    return await _call_chat_backend(
+        transcript,
+        provider="openrouter",
+        base_url=_OPENROUTER_BASE_URL,
+        api_key=api_key,
+        model=model,
+        trace_id=trace_id,
+        meeting_ref=meeting_ref,
+        language=language,
+        duration_sec=duration_sec,
+        transcript_confidence=transcript_confidence,
+        retries=MAX_OPENROUTER_RETRIES,
+    )
+
+
+async def _call_nvidia(
+    transcript: str,
+    *,
+    trace_id: str | None = None,
+    meeting_ref: str | None = None,
+    language: str = "en",
+    duration_sec: float | None = None,
+    transcript_confidence: float | None = None,
+) -> tuple[List[Dict[str, Any]], dict[str, Any]]:
+    api_key: str = getattr(settings, "NVIDIA_API_KEY", "") or ""
+    model: str = getattr(settings, "NVIDIA_TASK_MODEL", "meta/llama-4-maverick-17b-128e-instruct") or "meta/llama-4-maverick-17b-128e-instruct"
+    base_url: str = getattr(settings, "NVIDIA_BASE_URL", _NVIDIA_BASE_URL_DEFAULT) or _NVIDIA_BASE_URL_DEFAULT
+    return await _call_chat_backend(
+        transcript,
+        provider="nvidia",
+        base_url=base_url,
+        api_key=api_key,
+        model=model,
+        trace_id=trace_id,
+        meeting_ref=meeting_ref,
+        language=language,
+        duration_sec=duration_sec,
+        transcript_confidence=transcript_confidence,
+        retries=MAX_NVIDIA_RETRIES,
+    )
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 async def extract_tasks(
     transcript: str,
@@ -689,17 +784,19 @@ async def extract_tasks(
     transcript_confidence: float | None = None,
 ) -> List[Dict[str, Any]] | tuple[List[Dict[str, Any]], dict[str, Any]]:
     transcript = _normalize_space(transcript)
-    provider: str = getattr(settings, "TASK_PROVIDER", "openrouter") or "openrouter"
+    requested_provider: str = getattr(settings, "TASK_PROVIDER", "openrouter") or "openrouter"
     fallback_tasks = _extract_tasks_simple(transcript)
 
     debug: dict[str, Any] = {
-        "provider": provider,
+        "requested_provider": requested_provider,
+        "provider": requested_provider,
         "trace_id": trace_id,
         "fallback_tasks": len(fallback_tasks),
         "model": None,
         "raw_preview": None,
         "parse_stage": None,
-        "fallback_used": provider == "rules",
+        "fallback_used": requested_provider == "rules",
+        "fallback_merged": False,
         "conservative_mode": False,
     }
 
@@ -714,42 +811,63 @@ async def extract_tasks(
         or (transcript_confidence is not None and transcript_confidence < 0.60)
     )
 
-    # For short/noisy transcripts, better a conservative baseline than hallucinated tasks.
-    if short_or_noisy and provider != "rules":
+    if short_or_noisy and requested_provider != "rules":
         logger.info(
             "[TASK][%s] Conservative mode enabled: short/noisy transcript, using rule-based fallback only",
             trace_id or "-",
         )
         debug["conservative_mode"] = True
         debug["fallback_used"] = True
+        debug["provider"] = "rules"
+        debug["model"] = "rules"
         return (fallback_tasks, debug) if return_debug else fallback_tasks
 
-    if provider == "rules":
+    if requested_provider == "rules":
         logger.info("[TASK][%s] Using rule-based extraction", trace_id or "-")
+        debug["provider"] = "rules"
+        debug["model"] = "rules"
         return (fallback_tasks, debug) if return_debug else fallback_tasks
 
-    try:
-        llm_tasks, llm_debug = await _call_openrouter(
-            transcript,
-            trace_id=trace_id,
-            meeting_ref=meeting_ref,
-            language=language,
-            duration_sec=duration_sec,
-            transcript_confidence=transcript_confidence,
-        )
-        debug.update(llm_debug)
-    except Exception as exc:
-        logger.warning("[TASK][%s] OpenRouter failed, using rule-based fallback: %s", trace_id or "-", exc)
-        debug["error"] = str(exc)
-        debug["fallback_used"] = True
-        return (fallback_tasks, debug) if return_debug else fallback_tasks
+    provider_order: list[str] = []
+    normalized_requested = requested_provider.lower().strip()
+    if normalized_requested in {"openrouter", "nvidia"}:
+        provider_order.append(normalized_requested)
+    else:
+        provider_order.append("openrouter")
 
-    if not llm_tasks:
-        logger.info("[TASK][%s] LLM returned no tasks; trying NVIDIA fallback", trace_id or "-")
-        debug["llm_tasks"] = 0
-        # Try NVIDIA before giving up on rule-based fallback
-        if provider == "openrouter" and getattr(settings, "NVIDIA_API_KEY", ""):
-            try:
+    if normalized_requested == "openrouter":
+        if getattr(settings, "NVIDIA_API_KEY", ""):
+            provider_order.append("nvidia")
+    elif normalized_requested == "nvidia":
+        if getattr(settings, "OPENROUTER_API_KEY", ""):
+            provider_order.append("openrouter")
+    else:
+        if getattr(settings, "OPENROUTER_API_KEY", "") and "openrouter" not in provider_order:
+            provider_order.append("openrouter")
+        if getattr(settings, "NVIDIA_API_KEY", "") and "nvidia" not in provider_order:
+            provider_order.append("nvidia")
+
+    seen_providers: set[str] = set()
+    llm_tasks: List[Dict[str, Any]] = []
+    llm_debug: dict[str, Any] = {}
+    last_error: Exception | None = None
+
+    for provider_name in provider_order:
+        if provider_name in seen_providers:
+            continue
+        seen_providers.add(provider_name)
+
+        try:
+            if provider_name == "openrouter":
+                llm_tasks, llm_debug = await _call_openrouter(
+                    transcript,
+                    trace_id=trace_id,
+                    meeting_ref=meeting_ref,
+                    language=language,
+                    duration_sec=duration_sec,
+                    transcript_confidence=transcript_confidence,
+                )
+            elif provider_name == "nvidia":
                 llm_tasks, llm_debug = await _call_nvidia(
                     transcript,
                     trace_id=trace_id,
@@ -758,20 +876,39 @@ async def extract_tasks(
                     duration_sec=duration_sec,
                     transcript_confidence=transcript_confidence,
                 )
-                debug.update(llm_debug)
-                debug["fallback_from"] = "openrouter_empty"
-                logger.info("[TASK][%s] NVIDIA fallback returned %d tasks", trace_id or "-", len(llm_tasks))
-            except Exception as nvidia_exc:
-                logger.warning("[TASK][%s] NVIDIA fallback failed: %s", trace_id or "-", nvidia_exc)
-        if not llm_tasks:
-            debug["fallback_used"] = True
-            return (fallback_tasks, debug) if return_debug else fallback_tasks
+            else:
+                continue
+
+            debug.update(llm_debug)
+            debug["provider"] = llm_debug.get("provider", provider_name)
+            debug["model"] = llm_debug.get("model")
+            last_error = None
+
+            if llm_tasks:
+                break
+
+            logger.info("[TASK][%s] %s returned no tasks; trying next fallback", trace_id or "-", provider_name)
+        except Exception as exc:
+            last_error = exc
+            debug["error"] = str(exc)
+            debug["provider_error"] = provider_name
+            logger.warning("[TASK][%s] %s failed: %s", trace_id or "-", provider_name, exc)
+            continue
+
+    if not llm_tasks:
+        if last_error is not None:
+            debug["error"] = str(last_error)
+        debug["fallback_used"] = True
+        logger.info("[TASK][%s] Falling back to rule-based extraction", trace_id or "-")
+        debug["provider"] = "rules"
+        debug["model"] = "rules"
+        return (fallback_tasks, debug) if return_debug else fallback_tasks
 
     debug["llm_tasks"] = len(llm_tasks)
 
-    # If the LLM result is thin, merge with fallback to preserve some coverage.
     combined = llm_tasks if len(llm_tasks) >= 2 else llm_tasks + fallback_tasks
     debug["fallback_merged"] = len(llm_tasks) < 2 and len(fallback_tasks) > 0
+    debug["fallback_used"] = debug["fallback_used"] or debug["fallback_merged"] or debug["provider"] != requested_provider
 
     unique: List[Dict[str, Any]] = []
     seen: set[str] = set()
@@ -783,6 +920,7 @@ async def extract_tasks(
 
     result = unique[:20]
     debug["final_tasks"] = len(result)
+    debug["provider"] = debug.get("provider") or requested_provider
 
     return (result, debug) if return_debug else result
 
