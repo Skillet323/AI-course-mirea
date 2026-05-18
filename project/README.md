@@ -95,6 +95,15 @@ cp .env.example .env
 # Отредактируйте .env — добавьте OPENROUTER_API_KEY и HF_TOKEN
 ```
 
+> **Важно для pyannote (speaker diarization):**
+> Перед использованием `pyannote/speaker-diarization-3.1` нужно принять условия использования моделей на HuggingFace:
+> 1. Войдите на https://huggingface.co с вашим аккаунтом
+> 2. Примите условия на https://hf.co/pyannote/segmentation-3.0
+> 3. Примите условия на https://hf.co/pyannote/speaker-diarization-3.1
+> 4. Создайте токен на https://hf.co/settings/tokens и укажите его в `.env` как `HF_TOKEN=hf_...`
+>
+> Без этого pyannote будет пропущен и diarization перейдёт к resemblyzer-fallback (качество ниже).
+
 ---
 
 ## 4. Как запустить проект
@@ -129,7 +138,6 @@ npm run dev
 Фронтенд в режиме разработки доступен на `http://localhost:5173`.  
 API-запросы проксируются на `http://127.0.0.1:8000` автоматически (настроено в `vite.config.ts`).
 
-> **Важно:** перед запуском фронтенда убедитесь, что backend уже запущен на порту 8000.
 
 ### 4.3. Запуск через Docker
 
@@ -138,10 +146,13 @@ cd project
 docker build -t meeting-secretary .
 docker run --rm -p 8000:8000 --env-file .env meeting-secretary
 ```
-Gpu вариант:
+
+GPU (рекомендуется):
 ```bash
 cd project
+
 docker build -f Dockerfile.gpu -t meeting-secretary-gpu .
+
 docker run --rm --gpus all -p 8000:8000 --env-file .env meeting-secretary-gpu
 ```
 
@@ -240,7 +251,7 @@ pytest tests/ -v
 
 В текущей версии проекта есть ограничения:
 
-- diarization на шумных или очень коротких файлах может ошибаться;
+- diarization использует трёхуровневый fallback: pyannote (любая длина, чанкование) → ECAPA-TDNN (SpeechBrain) → resemblyzer с автоматическим подбором числа спикеров через silhouette score;
 - извлечение задач зависит от качества ответа LLM;
 - часть моделей OpenRouter может быть недоступна из-за rate limit;
 - оценка по gold-разметке отражает не все возможные сценарии.

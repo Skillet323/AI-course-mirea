@@ -17,13 +17,13 @@
 | 1  | Сервис запускается по инструкциям из `project/README.md` и работает      | ✅ | `README.md` разделы 3–4; `Dockerfile`; `uvicorn src.main:app` |
 | 2  | Endpoint `/predict` использует **реальную модель**, а не заглушку        | ✅ | `src/api/routes.py` → `POST /api/predict`; вызывает `extract_tasks()` → OpenRouter LLM или rule-based fallback |
 | 3  | Есть EDA и хотя бы один эксперимент с метриками                          | ✅ | `notebooks/01_eda.ipynb` — EDA gold-данных AMI; `report.md` раздел 3; `artifacts/` |
-| 4  | Есть baseline и улучшенная модель, есть **сравнение по метрикам**        | ✅ | `notebooks/02_baselines.ipynb` — rule-based baseline vs LLM; `artifacts/model_comparison.csv`; `report.md` раздел 5 |
+| 4  | Есть baseline и улучшенная модель, есть **сравнение по метрикам**        | ✅ | `notebooks/02_baselines.ipynb` — rule-based baseline vs LLM (OpenRouter) vs LLM (NVIDIA); `artifacts/model_comparison.csv`; `nvidia_models_comparison.csv`; `report.md` раздел 5 |
 | 5  | Код не свален в один ноутбук: есть внятная структура в `src/`            | ✅ | `src/api/`, `src/services/`, `src/training/`, `src/utils/` — разделены по слоям |
-| 6  | Есть Dockerfile **или** понятный сценарий развёртывания без Docker       | ✅ | `Dockerfile` (multi-stage: Node → Python); инструкция в `README.md` разделе 4.3 |
+| 6  | Есть Dockerfile **или** понятный сценарий развёртывания без Docker       | ✅ | `Dockerfile` (multi-stage: Node → Python); `Dockerfile.gpu`; инструкция в `README.md` разделе 4.3 |
 | 7  | Есть `.env.example` и **нет** в репозитории реальных секретов/паролей    | ✅ | `.env.example` с пустыми значениями; `.env` не содержит реальных токенов; `SECURITY.md` |
-| 8  | Реализованы логи/наблюдаемость (хотя бы консольные логи + `/health`)     | ✅ | `logging` во всех модулях `src/`; `GET /api/health` возвращает статус БД; `src/api/routes.py` |
-| 9  | В `report.md` **обоснован выбор финальной модели** по результатам экспериментов | ✅ | `report.md` раздел 5 «Выбор финальной модели»; сравнительная таблица с F1/Precision/Recall |
-| 10 | `project/README.md` и `report.md` позволяют понять сценарий демонстрации | ✅ | `README.md` раздел 7 «Демонстрация»; `report.md` раздел 9; описаны команды и endpoints |
+| 8  | Реализованы логи/наблюдаемость (хотя бы консольные логи + `/health`)     | ✅ | `logging` во всех модулях `src/`; `GET /api/health` возвращает статус БД; прогресс через SSE (`/api/progress`); `src/api/routes.py` |
+| 9  | В `report.md` **обоснован выбор финальной модели** по результатам экспериментов | ✅ | `report.md` раздел 5 «Выбор финальной модели»; таблицы OpenRouter и NVIDIA с F1/Precision/Recall; обоснован выбор отдельно для каждого провайдера |
+| 10 | `project/README.md` и `report.md` позволяют понять сценарий демонстрации | ✅ | `README.md` раздел 7 «Демонстрация»; `report.md` раздел 9; описаны команды и endpoints; 3-уровневый diarization и assignment без зарегистрированных участников |
 
 ---
 

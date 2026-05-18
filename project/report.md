@@ -35,7 +35,7 @@
 В проекте используются несколько связанных задач:
 
 - **ASR**: преобразование аудио в текст (Whisper);
-- **speaker diarization**: разделение реплик по спикерам (pyannote / resemblyzer);
+- **speaker diarization**: разделение реплик по спикерам (pyannote → ECAPA-TDNN → resemblyzer);
 - **information extraction**: извлечение задач из транскрипта (LLM + rule-based fallback);
 - **entity/role matching**: сопоставление задач с участниками (assignment engine).
 
@@ -96,7 +96,7 @@
 
 В проекте использовались:
 - **Whisper** (`medium`, CPU) — для ASR;
-- **pyannote/speaker-diarization-3.1** (первичный) / **resemblyzer** (fallback) — для diarization;
+- **pyannote/speaker-diarization-3.1** (первичный, чанкование до любой длины) / **ECAPA-TDNN** (SpeechBrain, промежуточный) / **resemblyzer** (fallback) — для diarization;
 - **rule-based экстрактор** — baseline для извлечения задач (40+ маркеров действий: `should`, `must`, `need to`, `design`, `prepare`, `review`, `will`, `going to` и др.);
 - **OpenRouter LLM-модели** — улучшенный подход для извлечения задач.
 
@@ -109,13 +109,17 @@
 - проверка согласованности задачи с транскриптом (`_task_supported_by_transcript`);
 - speaker aliases для замены `SPEAKER_XX` на имена;
 - global greedy matching в evaluation (матрица сходств, сортировка по убыванию score);
-- endpoint `POST /api/predict` для прямого ML-инференса по транскрипту.
+- endpoint `POST /api/predict` для прямого ML-инференса по транскрипту;
+- **diarization: убран жёсткий лимит по длительности** — pyannote теперь работает с аудио любой длины через автоматическое чанкование (PYANNOTE_CHUNK_SEC=600с, с перекрытием 30с);
+- **diarization: трёхуровневый fallback**: pyannote → ECAPA-TDNN (SpeechBrain, более богатые эмбеддинги) → resemblyzer;
+- **diarization fallback: silhouette-based поиск оптимального числа спикеров** вместо фиксированного k=5; AgglomerativeClustering (Ward) вместо SpectralClustering;
+- **assignment: имя/метка назначается даже без зарегистрированных участников** — из `assignee_hint`, `source_snippet`, либо метка SPEAKER_XX для группировки задач.
 
 ### Нейросетевые модели
 
 - **ASR:** Whisper small (82M параметров, мультиязычный).
 - **Task extraction:** LLM через OpenRouter API — сравнивались 4 модели (см. раздел 5).
-- **Diarization:** pyannote/speaker-diarization-3.1 (primary) / resemblyzer + SpectralClustering (fallback).
+- **Diarization:** `pyannote/speaker-diarization-3.1` (primary, чанкование для аудио любой длины) → `ECAPA-TDNN/SpeechBrain` (intermediate) → `resemblyzer` + silhouette-optimal AgglomerativeClustering (fallback).
 
 ---
 
@@ -128,7 +132,7 @@
 Результаты сохранялись в `artifacts/model_comparison.csv` и `artifacts/model_comparison.json`.  
 Воспроизводимый анализ — в `notebooks/02_baselines.ipynb`.
 
-### Сравнение моделей по метрикам
+### Сравнение моделей по метрикам (OpenRouter)
 
 | Модель / конфигурация | Успешных встреч | Всего встреч | Task F1 | Precision | Recall | Assignee Acc. | Deadline Acc. | Комментарий |
 |---|---:|---:|---:|---:|---:|---:|---:|---|
@@ -136,6 +140,24 @@
 | `inclusionai/ring-2.6-1t:free` | 7 | 13 | **0.257** | **0.244** | **0.286** | 0.300 | 0.200 | Лучший баланс F1 |
 | `openai/gpt-oss-120b:free` | 3 | 13 | 0.222 | 0.167 | 0.333 | 0.000 | 0.000 | Работает, но нестабилен |
 | `nvidia/nemotron-3-super-120b-a12b:free` | 4 | 13 | 0.028 | 0.017 | 0.083 | 0.000 | 0.000 | Низкая полезность |
+
+### Сравнение моделей NVIDIA Build API (дополнительный эксперимент)
+
+Проведено сравнение 9 моделей через NVIDIA API на тех же 13 встречах AMI (`scripts/compare_task_models.py --provider nvidia`).
+
+| Модель (NVIDIA) | OK встреч | Task F1 | Precision | Recall | Latency | Примечание |
+|---|---:|---:|---:|---:|---:|---|
+| `upstage/solar-10.7b-instruct` | 7/13 | **0.212** | 0.181 | 0.262 | 12.1s | Высокий F1, нестабильный (500/400 ошибки) |
+| `google/gemma-3n-e4b-it` | **13/13** | 0.203 | 0.162 | **0.282** | 25.9s | **Лучший по надёжности + F1** |
+| `google/gemma-3n-e2b-it` | **13/13** | 0.185 | 0.142 | **0.308** | 29.2s | Высокий recall, работает всегда |
+| `qwen/qwen3-coder-480b-a35b-instruct` | **13/13** | 0.144 | 0.154 | 0.154 | 10.8s | Быстрый, умеренный F1 |
+| `mistralai/mistral-large-3-675b-instruct-2512` | 13/13 | 0.097 | 0.094 | 0.128 | 89.3s | Медленный, низкий F1 |
+| `nvidia/nemotron-mini-4b-instruct` | 12/13 | 0.000 | 0.000 | 0.000 | 0.3s | Не извлекает задачи совсем |
+| `meta/llama-4-maverick-17b-128e-instruct` | error | — | — | — | — | Недоступен |
+| `mistralai/mistral-nemotron` | error | — | — | — | — | Деградация |
+| `bytedance/seed-oss-36b-instruct` | error | — | — | — | — | Деградация |
+
+**Вывод по NVIDIA:** Лучший компромисс — `google/gemma-3n-e4b-it` (F1=0.203, 13/13 встреч, умеренная latency). Используется как основная модель при `TASK_PROVIDER=nvidia`.
 
 ### Сводные метрики ASR (Whisper small, 13 встреч)
 
@@ -155,13 +177,21 @@
 
 ### Выбор финальной модели
 
-**Финальная модель: `inclusionai/ring-2.6-1t:free` через OpenRouter.**
+**Финальная модель (OpenRouter): `inclusionai/ring-2.6-1t:free` → авто-fallback на `google/gemini-2.5-flash-lite`.**
 
 Обоснование:
 1. Наивысший Task F1 (0.257) при достаточном числе успешных запусков (7/13) — лучший баланс качество/надёжность.
 2. Значительно лучший precision (0.244) по сравнению с baseline (0.080) — меньше ложных срабатываний.
-3. Бесплатный tier OpenRouter, без rate limits.
-4. При сбоях (parse_failed) автоматически включается rule-based fallback, что гарантирует наличие результата.
+3. Бесплатный tier OpenRouter; при сбоях router автоматически переходит на другую модель (`google/gemini-2.5-flash-lite` выступает де-факто fallback, показывая высокую стабильность).
+4. При parse_failed автоматически включается rule-based fallback — результат гарантирован.
+
+**Финальная модель (NVIDIA): `google/gemma-3n-e4b-it`.**
+
+Обоснование (из бенчмарка на 13 встречах AMI):
+1. F1=0.203 — лучший среди полностью надёжных моделей NVIDIA (13/13 встреч без ошибок).
+2. `upstage/solar-10.7b-instruct` имеет чуть выше F1 (0.212), но нестабилен (7/13 встреч, ошибки 400/500).
+3. Latency 25.9s — приемлемо для асинхронного пайплайна.
+4. Используется при `TASK_PROVIDER=nvidia` в `.env`.
 
 Rule-based baseline используется только как fallback — его высокий recall (0.63) компенсирует низкий precision при недоступности LLM.
 
@@ -240,9 +270,9 @@ Rule-based baseline используется только как fallback — е
 ## 8. Ограничения и дальнейшая работа
 
 Ограничения проекта:
-- diarization может ошибаться на шумных или очень коротких файлах;
-- извлечение задач зависит от качества ответа LLM (6/13 встреч → parse_failed);
-- отдельные модели OpenRouter ограничены rate limit;
+- при отсутствии HF_TOKEN diarization использует ECAPA-TDNN или resemblyzer-fallback; качество ниже, чем у pyannote;
+- извлечение задач зависит от качества ответа LLM (часть встреч → parse_failed при OpenRouter);
+- assignment без зарегистрированных участников использует `assignee_hint` и имена из транскрипта с умеренной точностью;
 - evaluation по gold не покрывает все возможные сценарии.
 
 Дальнейшее развитие:

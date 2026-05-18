@@ -39,12 +39,13 @@ class Settings(BaseSettings):
 
     # ── NVIDIA Build API settings (used when TASK_PROVIDER == "nvidia") ───────
     NVIDIA_API_KEY: str = ""
-    NVIDIA_TASK_MODEL: str = "meta/llama-4-maverick-17b-128e-instruct"
+    # Best model by AMI benchmark (F1=0.203, 13/13 meetings completed):
+    NVIDIA_TASK_MODEL: str = "google/gemma-3n-e4b-it"
     # Available models on build.nvidia.com (free tier):
-    #   google/gemma-3n-e2b-it
-    #   minimaxai/minimax-m2.7
-    #   stepfun-ai/step-3.5-flash
-    #   meta/llama-4-maverick-17b-128e-instruct
+    #   google/gemma-3n-e4b-it              ← recommended (best F1, fully reliable)
+    #   qwen/qwen3-coder-480b-a35b-instruct ← good F1, reliable
+    #   google/gemma-3n-e2b-it              ← slightly lower F1, reliable
+    #   upstage/solar-10.7b-instruct        ← highest F1 but intermittent errors
     NVIDIA_BASE_URL: str = "https://integrate.api.nvidia.com/v1"
 
     # Legacy T5 fields — kept for backwards compatibility, no longer used by default

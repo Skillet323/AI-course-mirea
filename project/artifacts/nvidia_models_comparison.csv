@@ -1,0 +1,10 @@
+model,status,n_ok,n_total,avg_task_f1,avg_precision,avg_recall,avg_assignee_accuracy,avg_deadline_accuracy,avg_hallucination_rate,avg_predicted_tasks,avg_matched_tasks,avg_latency_sec,avg_raw_chars,n_rate_limited,n_forbidden,n_parse_failed,notes
+upstage/solar-10.7b-instruct,ok,7,13,0.2119,0.181,0.2619,0.25,0.0,0.0,3.4286,0.7143,12.128,1441.9,0,0,0,
+google/gemma-3n-e4b-it,ok,13,13,0.203,0.1618,0.2821,0.3333,0.1111,0.0192,4.7692,0.8462,25.849,1557.3,0,0,0,
+google/gemma-3n-e2b-it,ok,13,13,0.185,0.1419,0.3077,0.3333,0.0,0.0981,7.1538,0.8462,29.242,1889.3,0,0,0,
+qwen/qwen3-coder-480b-a35b-instruct,ok,13,13,0.1436,0.1538,0.1538,0.1667,0.0,0.0,0.9231,0.3846,10.826,308.1,0,0,0,
+mistralai/mistral-large-3-675b-instruct-2512,ok,13,13,0.0965,0.0943,0.1282,0.0,0.0,0.033,2.4615,0.3846,89.28,741.4,0,0,0,
+meta/llama-4-maverick-17b-128e-instruct,error,0,13,,,,,,,,,,,0,0,0,[Errno 11001] getaddrinfo failed
+mistralai/mistral-nemotron,error,0,13,,,,,,,,,,,0,0,0,"{""status"":400,""title"":""Bad Request"",""detail"":""Function id 'f81394d8-63c0-4023-afa2-7ad11aa54ca3': DEGRADED function cannot be invoked""}"
+nvidia/nemotron-mini-4b-instruct,ok,12,13,0.0,0.0,0.0,,,0.0,0.0,0.0,0.265,2.0,0,0,0,
+bytedance/seed-oss-36b-instruct,failed,0,13,,,,,,,,,,,0,0,0,

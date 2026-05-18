@@ -127,33 +127,141 @@ def _looks_like_person_name(candidate: str) -> bool:
     return not any(tok in low for tok in bad_tokens)
 
 
+_ROSTER_STOP = {
+    "the", "this", "that", "we", "i", "he", "she", "it", "a", "an",
+    "ok", "okay", "right", "there", "here", "so", "well", "also", "then",
+    "now", "just", "and", "but", "or", "in", "at", "by", "to", "you",
+    "you're", "i'm", "they", "them", "their", "our", "your", "my",
+    "next", "last", "first", "are", "is",
+}
+
+_ROLE_KW_RE = re.compile(
+    r"industrial designer|marketing expert|user interface designer"
+    r"|project manager|ux designer|ui designer|product manager"
+    r"|software engineer|developer|designer|researcher",
+    re.IGNORECASE,
+)
+
+
+def _is_real_name(text: str) -> bool:
+    words = text.strip().split()
+    if not words or len(words) > 4:
+        return False
+    if not all(w and w[0].isupper() for w in words):
+        return False
+    if any(w.lower() in _ROSTER_STOP for w in words):
+        return False
+    if any(len(w) < 2 for w in words):
+        return False
+    return True
+
+
+def _extract_roster_from_text(text: str) -> list[dict]:
+    """
+    Extract ALL named participants and their roles from raw transcript text.
+    Handles both self-introductions and host-led introductions like:
+      "we have Ebenezer Ademisoy... your role is? I'm the marketing expert"
+      "my name's Adam Duggard"
+      "Tarik Rahman ... Industrial designer"
+      "lastly we have Dave Cochran ... user interface designer"
+    Returns list of {name, role} dicts (deduped).
+    """
+    roster: list[dict] = []
+    seen: set[str] = set()
+
+    def _add(name: str, role: Optional[str]):
+        name = name.strip()
+        if not _is_real_name(name):
+            return
+        key = name.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        roster.append({"name": name, "role": (role or "").strip() or None})
+
+    # Pattern 1: self-intro
+    for m in re.finditer(
+        r"(?:my name(?:'s| is)|i(?:'m| am))\s+([A-Z][A-Za-z'\-]+(?:\s+[A-Z][A-Za-z'\-]+)?)",
+        text, re.IGNORECASE,
+    ):
+        _add(m.group(1), None)
+
+
+    # Pattern 2: host-led "we have <Name>" — sentence-aware look-ahead for role
+    # Pattern 2: host-led 'we have <Name>' — sentence-aware role look-ahead
+    # Split on both punctuation and newlines
+    sentences = re.split(r'(?:[.!?]\s+|\n+)', text)
+    # Compile triggers with IGNORECASE; name pattern WITHOUT so [A-Z] = strictly uppercase
+    _INTRO_TRIGGER = re.compile(
+        r'we have|next we have|lastly we have|introducing|and then we have',
+        re.IGNORECASE,
+    )
+    _NAME_CAP_RE = re.compile(r'([A-Z][a-z\'\-]+(?:\s+[A-Z][a-z\'\-]+)?)')
+    for i, sent in enumerate(sentences):
+        trig = _INTRO_TRIGGER.search(sent)
+        if not trig:
+            continue
+        # Look for name in current sentence + next 2 sentences
+        # (handles 'Next we have?' where name is in next sentence)
+        search_ctx = sent[trig.end():] + ' ' + ' '.join(sentences[i+1:i+3])
+        name_m = _NAME_CAP_RE.search(search_ctx[:150])
+        if not name_m:
+            continue
+        candidate = name_m.group(1).strip()
+        if not _is_real_name(candidate):
+            continue
+        context = ' '.join(sentences[i:i+6])
+        role_m = _ROLE_KW_RE.search(context)
+        _add(candidate, role_m.group(0) if role_m else None)
+
+    # Pattern 3: fill in missing roles for already-found names
+    for entry in roster:
+        if entry["role"] is None:
+            idx = text.lower().find(entry["name"].lower())
+            if idx >= 0:
+                role_m = _ROLE_KW_RE.search(text[idx: idx + 300])
+                if role_m:
+                    entry["role"] = role_m.group(0).strip()
+
+    return roster
+
+
 def _infer_speaker_aliases(segments: List[Dict[str, Any]]) -> dict[str, str]:
-    """Infer names from self-introductions in early diarized turns."""
+    """
+    Infer SPEAKER_XX → name mapping from diarized segments.
+    Uses self-introductions AND host-led introductions.
+    Each SPEAKER_XX is only assigned one name (first confident match wins).
+    """
     aliases: dict[str, str] = {}
 
-    patterns = [
+    self_intro_patterns = [
         r"(?:i'm|i am|my name is|this is|name's)\s+([A-Z][A-Za-z'\-]+(?:\s+[A-Z][A-Za-z'\-]+)?)",
-        r"(?:i am)\s+([A-Z][A-Za-z'\-]+(?:\s+[A-Z][A-Za-z'\-]+)?)",
     ]
 
-    for seg in segments[:40]:
+    for seg in segments[:60]:  # check more segments (was 40)
         speaker = _normalize_speaker_label(seg.get("speaker") or "Unknown")
         text = str(seg.get("text") or "")
         if speaker in aliases:
             continue
 
-        for pat in patterns:
+        for pat in self_intro_patterns:
             m = re.search(pat, text, flags=re.IGNORECASE)
             if not m:
                 continue
             candidate = m.group(1).strip()
-
-            # Reject phrases like "I am getting out"
             if _looks_like_person_name(candidate) and len(candidate.split()) <= 3:
                 aliases[speaker] = candidate
                 break
 
     return aliases
+
+
+def _build_roster_from_transcript(full_text: str) -> list[dict]:
+    """
+    Public helper: extract all named participants + roles from the full transcript.
+    Used downstream for role-based task assignment.
+    """
+    return _extract_roster_from_text(full_text)
 
 
 def _apply_speaker_aliases(segments: List[Dict[str, Any]], alias_map: dict[str, str]) -> List[Dict[str, Any]]:
@@ -257,6 +365,10 @@ def transcribe_from_bytes(audio_source: Union[bytes, str], filename: Optional[st
         enriched_segments = _apply_speaker_aliases(merged_segments, speaker_aliases)
         speaker_transcript = _segments_to_speaker_transcript(enriched_segments) or str(result.get("text", "")).strip()
 
+        # Extract full participant roster from transcript (names + roles mentioned by anyone)
+        full_text = str(result.get("text", "")).strip()
+        meeting_roster = _build_roster_from_transcript(full_text) if full_text else []
+
         confidence = float(sum(confidences) / len(confidences)) if confidences else None
 
         output: Dict[str, Any] = {
@@ -265,6 +377,7 @@ def transcribe_from_bytes(audio_source: Union[bytes, str], filename: Optional[st
             "segments": enriched_segments,
             "speaker_transcript": speaker_transcript,
             "speaker_aliases": speaker_aliases,
+            "meeting_roster": meeting_roster,
             "confidence": confidence,
             "has_diarization": has_diarization,
         }

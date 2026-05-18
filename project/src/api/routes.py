@@ -187,6 +187,7 @@ async def _process_meeting_background(meeting_id: int, audio_source: str, filena
         transcript = res.get("text", "") or ""
         speaker_transcript = res.get("speaker_transcript") or transcript
         speaker_aliases = res.get("speaker_aliases") or {}
+        meeting_roster = res.get("meeting_roster") or []
         segments = res.get("segments", []) or []
         language = res.get("language") or "en"
         confidence = res.get("confidence")
@@ -227,6 +228,7 @@ async def _process_meeting_background(meeting_id: int, audio_source: str, filena
         metadata_for_assignment = {
             "filename": filename,
             "speaker_aliases": speaker_aliases,
+            "meeting_roster": meeting_roster,
             "has_diarization": has_diarization,
             "transcript_confidence": confidence,
             "task_provider": task_debug.get("provider"),
