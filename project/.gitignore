@@ -1,13 +1,13 @@
 # Python
-backend/.venv/
-backend/__pycache__/
-backend/*.pyc
-backend/*.pyo
-backend/*.pyd
-backend/.env
-backend/meeting_secretary.db
-backend/*.log
-backend/model_cache/
+src/.venv/
+src/__pycache__/
+src/*.pyc
+src/*.pyo
+src/*.pyd
+src/.env
+src/meeting_secretary.db
+src/*.log
+src/model_cache/
 .env
 # Node
 frontend/node_modules/
@@ -16,7 +16,7 @@ frontend/.env
 frontend/.vite
 
 # Data (audio files are large)
-backend/data/
+src/data/
 # Keep gold_annotations/ (small JSON annotations)
 
 # OS
@@ -30,23 +30,23 @@ desktop.ini
 *.swp
 *.swo
 
-# Temporary scripts in backend root (dev only)
-backend/check_*.py
-backend/test_*.py
-backend/debug_*.py
-backend/fix_*.py
-backend/simplify_*.py
-backend/reload_*.py
-backend/create_*.py
-backend/populate_*.py
-backend/recreate_*.py
-backend/curate_*.py
-backend/auto_*.py
-backend/prepare_*.py
-backend/load_*.py
-backend/evaluate_*.py
-backend/quick_*.py
-backend/rebuild_db.py
+# Temporary scripts in src root (dev only)
+src/check_*.py
+src/test_*.py
+src/debug_*.py
+src/fix_*.py
+src/simplify_*.py
+src/reload_*.py
+src/create_*.py
+src/populate_*.py
+src/recreate_*.py
+src/curate_*.py
+src/auto_*.py
+src/prepare_*.py
+src/load_*.py
+src/evaluate_*.py
+src/quick_*.py
+src/rebuild_db.py
 
 # Local docs (keep only README.md)
 DATASET_GUIDE.md
@@ -66,7 +66,7 @@ BOOTSTRAP.md
 *.bak
 *.tmp
 
-*.wav
-*.mp3
-*.m4a
-*.ogg
+# *.wav
+# *.mp3
+# *.m4a
+# *.ogg
